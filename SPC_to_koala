@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPC → KOALA | S-SMP Sample Extractor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    /* スーパーファミコン本体の配色 */
+    --body:#c9c9d3;         /* 本体グレー */
+    --panel:#dcdce3;        /* 明るいパネル */
+    --panel-deep:#b3b3bf;   /* 沈んだグレー */
+    --slot:#8e8e9c;         /* カセット挿入口 */
+    --ink:#3a3a46;          /* 濃スレート文字 */
+    --ink-soft:#6d6d7c;
+    --sfc-red:#e6402a; --sfc-yellow:#f0a800; --sfc-green:#159a54; --sfc-blue:#1c6bb8;
+    --wave:#2f2f3a;
+    --radius:10px;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{background:var(--body); color:var(--ink);
+    font-family:-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;}
+  .wrap{max-width:760px; margin:0 auto; padding:20px 14px 80px;}
+
+  /* ── ヘッダ: チップのシルク印刷風 ── */
+  header{display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;
+    border-bottom:3px solid var(--ink); padding-bottom:10px; margin-bottom:18px;}
+  header h1{font-size:clamp(22px,5vw,30px); font-weight:800; letter-spacing:.04em;}
+  header h1 .arrow{color:var(--sfc-red);}
+  header .chiplabel{font-size:11px; letter-spacing:.22em; color:var(--ink-soft);
+    text-transform:uppercase;}
+  .btn-dots{display:inline-flex; gap:5px; margin-left:auto; align-self:center;}
+  .btn-dots i{width:11px;height:11px;border-radius:50%;display:block;}
+  .btn-dots i:nth-child(1){background:var(--sfc-red);}   .btn-dots i:nth-child(2){background:var(--sfc-yellow);}
+  .btn-dots i:nth-child(3){background:var(--sfc-green);} .btn-dots i:nth-child(4){background:var(--sfc-blue);}
+
+  /* ── ドロップゾーン: カセット挿入口 ── */
+  #drop{position:relative; border-radius:var(--radius); background:var(--panel-deep);
+    padding:26px 16px 22px; text-align:center; cursor:pointer;
+    border:2px dashed transparent; transition:border-color .15s ease, background .15s ease;}
+  #drop .slot{width:min(340px,80%); height:16px; margin:0 auto 14px; border-radius:4px;
+    background:linear-gradient(var(--slot), #7c7c8a); box-shadow:inset 0 3px 6px rgba(0,0,0,.35);}
+  #drop p{font-size:14px; font-weight:600;}
+  #drop small{display:block; margin-top:6px; color:var(--ink-soft); font-size:12px;}
+  #drop.over{border-color:var(--sfc-green); background:#c2cfc6;}
+  #drop input{display:none;}
+
+  /* ── 情報ストリップ ── */
+  #fileinfo{display:none; margin-top:16px; background:var(--panel); border-radius:var(--radius);
+    padding:12px 14px; font-size:12.5px; line-height:1.8;}
+  #fileinfo .row{display:flex; gap:10px; flex-wrap:wrap;}
+  #fileinfo .k{color:var(--ink-soft); letter-spacing:.08em; min-width:7em;}
+
+  /* ── オプション ── */
+  #opts{display:none; margin-top:14px; gap:10px; flex-wrap:wrap; align-items:center;}
+  #opts.on{display:flex;}
+  .seg{display:inline-flex; border:2px solid var(--ink); border-radius:8px; overflow:hidden;}
+  .seg button{border:0; background:var(--panel); color:var(--ink); padding:7px 14px;
+    font-size:12.5px; font-weight:700; cursor:pointer;}
+  .seg button.on{background:var(--ink); color:var(--panel);}
+  label.chk{display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600; cursor:pointer;}
+  label.chk input{accent-color:var(--sfc-green); width:16px; height:16px;}
+
+  /* ── パッドグリッド(署名要素) ── */
+  #padsec{display:none; margin-top:22px;}
+  #padsec h2, #listsec h2{font-size:12px; letter-spacing:.22em; color:var(--ink-soft);
+    margin-bottom:10px; text-transform:uppercase;}
+  #padgrid{display:grid; grid-template-columns:repeat(4,1fr); gap:8px;}
+  .pad{position:relative; aspect-ratio:1; border-radius:12px; background:var(--panel);
+    border:2px solid rgba(0,0,0,.14); cursor:pointer; overflow:hidden;
+    display:flex; flex-direction:column; box-shadow:0 2px 0 rgba(0,0,0,.18);}
+  .pad:active{transform:translateY(1px); box-shadow:0 1px 0 rgba(0,0,0,.18);}
+  .pad.playing{outline:3px solid var(--ink);}
+  .pad canvas{flex:1; width:100%; display:block;}
+  .pad .tag{font-size:9.5px; font-weight:800; letter-spacing:.05em; text-align:center;
+    padding:3px 2px 4px; color:#fff;}
+  .pad.empty{background:var(--panel-deep); border-style:dashed; cursor:default; box-shadow:none;}
+  .pad.empty .tag{color:var(--ink-soft); background:none !important;}
+
+  /* ── サンプル一覧 ── */
+  #listsec{display:none; margin-top:24px;}
+  #cap{font-size:12px; color:var(--ink-soft); margin-bottom:8px;}
+  #cap b{color:var(--ink);}
+  .srow{display:flex; align-items:center; gap:10px; background:var(--panel);
+    border-radius:8px; padding:7px 10px; margin-bottom:6px; font-size:12.5px;}
+  .srow input{accent-color:var(--sfc-blue); width:16px; height:16px; flex:none;}
+  .srow canvas{width:90px; height:26px; flex:none; background:#eceef0; border-radius:4px;}
+  .srow .nm{font-weight:700; min-width:4.5em;}
+  .srow .meta{color:var(--ink-soft);}
+  .srow button{margin-left:auto; flex:none; border:2px solid var(--ink); background:var(--panel);
+    border-radius:6px; width:30px; height:26px; cursor:pointer; font-size:12px; line-height:1;}
+  .srow.dup{opacity:.45;}
+  .lp{font-size:9.5px; font-weight:800; color:#fff; border-radius:4px; padding:2px 5px;}
+  .lp.loop{background:var(--sfc-blue);} .lp.shot{background:var(--sfc-green);}
+
+  /* ── ダウンロード ── */
+  #dlsec{display:none; margin-top:26px; gap:10px; flex-wrap:wrap;}
+  #dlsec.on{display:flex;}
+  .big{border:0; border-radius:10px; padding:14px 22px; font-size:15px; font-weight:800;
+    letter-spacing:.03em; cursor:pointer; color:#fff; box-shadow:0 3px 0 rgba(0,0,0,.25);}
+  .big:active{transform:translateY(2px); box-shadow:0 1px 0 rgba(0,0,0,.25);}
+  #dlkoala{background:var(--sfc-red); flex:1; min-width:220px;}
+  #dlwav{background:var(--slot);}
+  #note{display:none; margin-top:14px; font-size:11.5px; color:var(--ink-soft); line-height:1.7;}
+  #err{display:none; margin-top:14px; background:#f3d7d2; border:2px solid var(--sfc-red);
+    border-radius:8px; padding:10px 12px; font-size:13px;}
+  @media (prefers-reduced-motion:reduce){ *{transition:none !important;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>SPC <span class="arrow">→</span> KOALA</h1>
+    <span class="chiplabel mono">S-SMP · BRR Sample Extractor</span>
+    <span class="btn-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+  </header>
+
+  <div id="drop">
+    <div class="slot" aria-hidden="true"></div>
+    <p>SPCファイルをここにドロップ</p>
+    <small>またはタップして選択(.spc / 約66KB)</small>
+    <input type="file" id="fpick" accept=".spc">
+  </div>
+
+  <div id="err"></div>
+
+  <div id="fileinfo" class="mono"></div>
+
+  <div id="opts">
+    <div class="seg" id="rateseg">
+      <button data-r="16000">16 kHz</button>
+      <button data-r="32000" class="on">32 kHz</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="looppad" checked>ループ音色をループパッド化</label>
+    <label class="chk"><input type="checkbox" id="useenv" checked>ADSRエンベロープ適用(DSP実測 / 無ければ典型値)</label>
+  </div>
+
+  <section id="padsec">
+    <h2 id="padtitle">Pad Bank A — タップで試聴</h2>
+    <div class="seg" id="bankseg" style="margin-bottom:10px;">
+      <button data-b="0" class="on">A</button><button data-b="1">B</button>
+      <button data-b="2">C</button><button data-b="3">D</button>
+    </div>
+    <div id="padgrid"></div>
+  </section>
+
+  <section id="listsec">
+    <h2>抽出サンプル</h2>
+    <div id="cap"></div>
+    <div id="slist"></div>
+  </section>
+
+  <div id="dlsec">
+    <button class="big" id="dlkoala">.koala をダウンロード</button>
+    <button class="big" id="dlwav">WAV一括 (ZIP)</button>
+  </div>
+
+  <p id="note">※ 出力の .koala / WAV に含まれる音声データの権利は元コンテンツの権利者に帰属します。利用は私的使用の範囲で。<br>
+  ※ ループパッドは looping=true で書き出します。Koala側の挙動が想定と違う場合はループパッド化をオフにしてください。</p>
+</div>
+
+<script>
+"use strict";
+/* ===================== SPC 解析 ===================== */
+const MAGIC = "SNES-SPC700 Sound File Data";
+
+function parseSPC(buf){
+  const u8 = new Uint8Array(buf);
+  if(u8.length < 0x10180) throw new Error("ファイルが小さすぎます(SPCは最低66,048バイト)");
+  const magic = new TextDecoder("ascii").decode(u8.slice(0,27));
+  if(magic !== MAGIC) throw new Error("SPCヘッダが見つかりません(" + magic.slice(0,16) + "...)");
+  const ram = u8.slice(0x100, 0x10100);
+  const dsp = u8.slice(0x10100, 0x10180);
+  // ID666(バイナリ/テキストの揺れがあるため、表示用に緩く読む)
+  const id666 = {};
+  if(u8[0x23] === 26){
+    const sj = (off,len)=>{ const raw = u8.slice(off,off+len); let e = raw.indexOf(0); if(e<0) e=len;
+      try{ return new TextDecoder("shift_jis").decode(raw.slice(0,e)).trim(); }
+      catch(_){ return new TextDecoder("ascii").decode(raw.slice(0,e)).trim(); } };
+    id666.song = sj(0x2E,32); id666.game = sj(0x4E,32); id666.artist = sj(0xB1,32);
+  }
+  // DSPレジスタから8ボイス分の SRCN / ADSR1 / ADSR2 / GAIN を抽出
+  const voices = [];
+  for(let v=0; v<8; v++){
+    voices.push({
+      voice: v,
+      srcn:  dsp[v*16 + 4],
+      adsr1: dsp[v*16 + 5],
+      adsr2: dsp[v*16 + 6],
+      gain:  dsp[v*16 + 7],
+    });
+  }
+  return { u8, ram, dsp, id666, dir: dsp[0x5D] << 8, voices };
+}
+
+/* ===================== ADSR エンベロープ ===================== */
+/* 各テーブルは Super MIDI Pak doc (supermidipak.com/doc) のハード実測値に準拠 */
+/* S-DSP アタックレート(AR 0..15)→ 0→フルまでの秒数 */
+const AR_TIME = [4.1,2.5,1.5,1.0,0.64,0.38,0.26,0.16,0.096,0.064,0.040,0.024,0.016,0.010,0.006,0];
+/* S-DSP ディケイレート(DR 0..7)→ フル→サスティンレベルまでの秒数 */
+const DR_TIME = [1.2,0.74,0.44,0.29,0.18,0.11,0.074,0.037];
+/* S-DSP サスティンレート(SR 0..31)→ 減衰時間の秒数(0は減衰なし=∞) */
+const SR_TIME = [Infinity,38,28,24,19,14,12,9.4,7.1,5.9,4.7,3.5,2.9,2.4,1.8,1.5,
+                 1.2,0.88,0.74,0.59,0.44,0.37,0.29,0.22,0.18,0.15,0.11,0.092,0.074,0.055,0.037,0.018];
+/* Koalaノブ(0..1)への変換上限。実測に合わせて調整可能 */
+const KOALA_ATT_MAX = 4.1;   // attackノブ最大 ≒ この秒数とみなす
+const KOALA_REL_MAX = 4.0;   // releaseノブ最大 ≒ この秒数とみなす
+const KOALA_ATT_MIN = 0.00011; // Koalaのattack最小デフォルト値
+
+function toKoalaAttack(sec){
+  if(!(sec > 0.006)) return KOALA_ATT_MIN;
+  return Math.min(1, Math.sqrt(sec / KOALA_ATT_MAX));
+}
+function toKoalaRelease(sec){
+  if(!isFinite(sec) || sec <= 0) return 0;   // SR=0(減衰なし)はキーオフで即カット扱い
+  return Math.min(1, Math.sqrt(Math.min(sec, KOALA_REL_MAX) / KOALA_REL_MAX));
+}
+/* SRCN→エンベロープのマップを作る(ADSR有効なボイスを優先) */
+function buildEnvMap(voices){
+  const map = new Map();
+  for(const v of voices){
+    if(!(v.adsr1 & 0x80)) continue;          // GAINモードはスキップ(典型値へフォールバック)
+    if(map.has(v.srcn)) continue;            // 同一SRCNは最初のADSR有効ボイスを採用
+    const ar = v.adsr1 & 0x0F;
+    const dr = (v.adsr1 >> 4) & 0x07;
+    const sr = v.adsr2 & 0x1F;
+    const sl = (v.adsr2 >> 5) & 0x07;
+    /* release推定: SLを重みにディケイ/サスティンをブレンド
+       - SL高(持続音): サスティン減衰が支配的 → SR時間寄り
+       - SL低(ピアノ的減衰音): ディケイが支配的 → DR時間寄り
+       ※ SNES実機のキーオフ後リリースは最大8ms固定(release制御は存在しない)ため、
+         これは「音が減衰していく聴感」をKoalaのreleaseに写す近似 */
+    const slFrac = (sl + 1) / 8;
+    const drSec = DR_TIME[dr], srSec = SR_TIME[sr];
+    let relSec;
+    if(!isFinite(srSec)){
+      relSec = (1 - slFrac) * drSec;         // SR=∞: SL=8/8なら0(ゲート)、SL低ならディケイ支配
+    } else {
+      relSec = slFrac * srSec + (1 - slFrac) * drSec;
+    }
+    map.set(v.srcn, {
+      fromDSP: true, voice: v.voice, ar, dr, sr, sl,
+      attackSec: AR_TIME[ar], decaySec: drSec, sustainSec: srSec, releaseSec: relSec,
+      attack: toKoalaAttack(AR_TIME[ar]),
+      release: toKoalaRelease(relSec),
+    });
+  }
+  return map;
+}
+/* DSPに情報がないサンプルへの典型値 */
+function typicalEnv(loopFlag){
+  return loopFlag
+    ? {fromDSP:false, attack:KOALA_ATT_MIN, release:0.35}   // 楽器系: 即立ち上がり+中程度リリース
+    : {fromDSP:false, attack:KOALA_ATT_MIN, release:0};     // ワンショット: リリースなし
+}
+
+/* ディレクトリ走査: 妥当なBRRサンプルを列挙 */
+function scanSamples(ram, dirAddr){
+  const out = [];
+  for(let i=0;i<256;i++){
+    const off = dirAddr + i*4;
+    if(off+4 > 0x10000) break;
+    const start = ram[off] | (ram[off+1]<<8);
+    const loopP = ram[off+2] | (ram[off+3]<<8);
+    if(start === 0 || start === 0xFFFF) continue;
+    let p = start, blocks = 0, end = -1, loopFlag = false;
+    while(p+9 <= 0x10000 && blocks < 7282){
+      const hdr = ram[p]; blocks++;
+      if(hdr & 1){ end = p+9; loopFlag = !!(hdr & 2); break; }
+      p += 9;
+    }
+    if(end < 0) continue;
+    out.push({idx:i, start, end, loopP, loopFlag, bytes:end-start, frames:blocks*16});
+  }
+  return out;
+}
+
+/* 内容ハッシュ(FNV-1a)で重複検出 */
+function contentHash(ram, s){
+  let h = 0x811c9dc5;
+  for(let i=s.start;i<s.end;i++){ h ^= ram[i]; h = Math.imul(h, 0x01000193); }
+  return (h>>>0).toString(16) + ":" + s.bytes;
+}
+
+/* ===================== BRR デコード ===================== */
+function clamp16(v){ return v>32767?32767 : v<-32768?-32768 : v; }
+function decodeBRR(ram, start, end){
+  const n = ((end-start)/9|0)*16;
+  const out = new Int16Array(n);
+  let p1=0, p2=0, o=0;
+  for(let i=start; i+9<=end; i+=9){
+    const hdr = ram[i], shift = hdr>>4, filt = (hdr>>2)&3;
+    for(let j=0;j<16;j++){
+      const b = ram[i+1+(j>>1)];
+      let nib = (j&1) ? (b&0xF) : (b>>4);
+      if(nib >= 8) nib -= 16;
+      let s = (shift<=12) ? (nib<<shift)>>1 : (nib>=0?2048:-2048);
+      if(filt===1)      s += p1 + (-p1>>4);
+      else if(filt===2) s += (p1<<1) + (-((p1<<1)+p1)>>5) - p2 + (p2>>4);
+      else if(filt===3) s += (p1<<1) + (-(p1+(p1<<2)+(p1<<3))>>6) - p2 + (((p2<<1)+p2)>>4);
+      s = clamp16(s); p2 = p1; p1 = s; out[o++] = s;
+    }
+  }
+  return out;
+}
+
+/* ===================== WAV エンコード ===================== */
+function encodeWAV(pcm, rate){
+  const buf = new ArrayBuffer(44 + pcm.length*2);
+  const v = new DataView(buf);
+  const ws = (o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
+  ws(0,"RIFF"); v.setUint32(4, 36+pcm.length*2, true); ws(8,"WAVE");
+  ws(12,"fmt "); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  ws(36,"data"); v.setUint32(40, pcm.length*2, true);
+  new Int16Array(buf,44).set(pcm);
+  return buf;
+}
+
+/* ===================== .koala テンプレート ===================== */
+const PAD_TPL = {attack:0.00011,bus:-1,channel:0,chokeGroup:0,cyclicPeriod:20,end:0,
+  eq:{enabled:"false",hi:{freq:8000.0,gain:0.0,q:1.0,type:"highshelf"},
+      lo:{freq:100.0,gain:0.0,q:1.0,type:"lowshelf"},
+      mid:{freq:1000.0,gain:0.0,q:1.0,type:"peaking"}},
+  hasLoopPoint:"false",label:"",loopPoint:-1,looping:"false",muted:false,oneshot:"true",
+  pad:"0",pan:0.5,pingpong:"false",pitch:0.0,release:0.0,reverse:"false",sampleId:0,
+  start:0,stretch:1,stretchLength:0.0,stretching:false,tone:0.0,type:"sample",vol:1.0,
+  xfade:200,zoomEnd:0,zoomStart:0};
+const MIXER_TPL = {"buses":[{"chain":[null,null,null,null,null],"mute":false,"name":"BUS A","solo":false,"volume":1.0},{"chain":[null,null,null,null,null],"mute":false,"name":"BUS B","solo":false,"volume":1.0},{"chain":[null,null,null,null,null],"mute":false,"name":"BUS C","solo":false,"volume":1.0},{"chain":[null,null,null,null,null],"mute":false,"name":"BUS D","solo":false,"volume":1.0}],"master":{"chain":[null,null,null,null,null],"mute":false,"name":"MAIN","solo":false,"volume":1.0}};
+const FX_TPL = {"buses":{"strawberry":[{"name":"CUTTER","value":0.0},{"name":"REVERSE","value":0.0},{"name":"DUB","value":0.0},{"name":"TEMPO DELAY","value":0.0},{"name":"TALKBOX","value":0.0},{"name":"VIBROFLANGE","value":0.5},{"name":"DIRTY","value":0.0},{"name":"COMPRESSOR","value":0.0}],"vanilla":[{"name":"CRUSH","value":0.0},{"name":"PITCH","value":0.5},{"name":"COMB","value":0.0},{"name":"RING","value":0.0},{"name":"REVERB","value":0.0},{"name":"STUTTER","value":0.0},{"name":"GATE","value":0.0},{"name":"FILTER","value":0.5}]},"hold":true};
+
+function buildSamplerJSON(sel, rate){
+  const pads = [], samples = [];
+  const useEnv = document.getElementById("useenv").checked;
+  sel.forEach((s, padNo)=>{
+    const p = JSON.parse(JSON.stringify(PAD_TPL));
+    const asLoop = s.loopFlag && document.getElementById("looppad").checked;
+    p.pad = String(padNo);
+    p.label = padLabel(s);
+    p.sampleId = 500 + s.idx;
+    p.end = p.zoomEnd = s.frames;
+    p.looping = asLoop ? "true" : "false";
+    p.oneshot = asLoop ? "false" : "true";
+    if(useEnv && s.env){
+      p.attack  = s.env.attack;
+      p.release = s.env.release;
+    }
+    pads.push(p);
+    samples.push({id:500+s.idx, metadata:{bpm:0.0,
+      creationTime:new Date().toISOString().slice(0,19).replace("T"," "),
+      musicalKey:"", originalPath:`spc_sample_${String(s.idx).padStart(2,"0")}.wav`,
+      rootNote:"none", source:"Imported", tags:[]}});
+  });
+  return {pads, samples};
+}
+function buildSongJSON(name){
+  return {inputFXShowing:false,keyboardMode:false,mixerOut:false,name:name,
+    padGrid:3,platform:"web",section:0,selectedPad:0,sequencePage:0,version:"1.4101 (6222)"};
+}
+function buildSequenceJSON(){
+  const seqs = Array.from({length:32},()=>({pattern:{notes:null,numBars:1}}));
+  return {autoPlay:"off",beatsPerBar:4,bpm:120.0,currSequenceId:0,
+    quantizeDivision:16,seqSnap:3,sequences:seqs,swing:0.0};
+}
+
+/* ===================== 状態 ===================== */
+let SPC = null;          // parseSPC結果
+let SAMPLES = [];        // ユニークサンプル
+let DUPES = [];          // 重複(表示用)
+let SELECTED = new Set();// 選択中 idx
+let RATE = 32000;
+let baseName = "spc_project";
+const MAXPADS = 64;      // 16パッド × 4バンク(A〜D)
+const BANKSIZE = 16;
+let BANK = 0;            // 表示中バンク 0..3
+let ENVMAP = new Map();  // SRCN → DSP実測エンベロープ
+let audioCtx = null;
+
+function padLabel(s){ return `S${String(s.idx).padStart(2,"0")}_${s.loopFlag?"loop":"shot"}`; }
+
+/* ===================== UI ===================== */
+const $ = id => document.getElementById(id);
+
+$("drop").addEventListener("click", ()=> $("fpick").click());
+$("fpick").addEventListener("change", e=>{ if(e.target.files[0]) loadFile(e.target.files[0]); });
+["dragover","dragenter"].forEach(ev=> $("drop").addEventListener(ev, e=>{e.preventDefault(); $("drop").classList.add("over");}));
+["dragleave","drop"].forEach(ev=> $("drop").addEventListener(ev, e=>{e.preventDefault(); $("drop").classList.remove("over");}));
+$("drop").addEventListener("drop", e=>{
+  const f = [...e.dataTransfer.files].find(f=>f.name.toLowerCase().endsWith(".spc")) || e.dataTransfer.files[0];
+  if(f) loadFile(f);
+});
+
+document.querySelectorAll("#rateseg button").forEach(b=>{
+  b.addEventListener("click", ()=>{
+    document.querySelectorAll("#rateseg button").forEach(x=>x.classList.remove("on"));
+    b.classList.add("on"); RATE = +b.dataset.r;
+  });
+});
+
+async function loadFile(file){
+  $("err").style.display = "none";
+  try{
+    const buf = await file.arrayBuffer();
+    SPC = parseSPC(buf);
+    baseName = file.name.replace(/\.[^.]+$/,"");
+    const all = scanSamples(SPC.ram, SPC.dir);
+    if(!all.length) throw new Error("有効なBRRサンプルが見つかりませんでした(DIR=0x"+SPC.dir.toString(16).toUpperCase()+")");
+    // 重複除去
+    const seen = new Map(); SAMPLES = []; DUPES = [];
+    for(const s of all){
+      const h = contentHash(SPC.ram, s);
+      if(seen.has(h)){ s.dupOf = seen.get(h); DUPES.push(s); }
+      else{ seen.set(h, s.idx); s.pcm = decodeBRR(SPC.ram, s.start, s.end); SAMPLES.push(s); }
+    }
+    // DSPボイスからのエンベロープ情報を各サンプルへ付与
+    ENVMAP = buildEnvMap(SPC.voices);
+    for(const s of SAMPLES){ s.env = ENVMAP.get(s.idx) || typicalEnv(s.loopFlag); }
+    // 自動選択: ワンショット(サイズ降順) → ループ(サイズ降順)
+    SELECTED = new Set();
+    const shots = SAMPLES.filter(s=>!s.loopFlag).sort((a,b)=>b.bytes-a.bytes);
+    const loops = SAMPLES.filter(s=> s.loopFlag).sort((a,b)=>b.bytes-a.bytes);
+    for(const s of [...shots, ...loops]){ if(SELECTED.size < MAXPADS) SELECTED.add(s.idx); }
+    BANK = 0; syncBankTabs();
+    // 注意: 波形canvasはレイアウト確定後(display変更後)に描画しないと
+    // clientWidthが0になり低解像度で引き伸ばされるため、先に表示を切り替える
+    $("opts").classList.add("on"); $("padsec").style.display = "block";
+    $("listsec").style.display = "block"; $("dlsec").classList.add("on");
+    $("note").style.display = "block";
+    renderInfo(); renderList(); renderPads();
+  }catch(e){
+    $("err").textContent = "読み込みエラー: " + e.message;
+    $("err").style.display = "block";
+  }
+}
+
+function renderInfo(){
+  const t = SPC.id666;
+  const tag = (t.song||t.game||t.artist)
+    ? `<div class="row"><span class="k">ID666</span><span>${[t.song,t.game,t.artist].filter(Boolean).join(" / ")}</span></div>`
+    : `<div class="row"><span class="k">ID666</span><span>タグなし</span></div>`;
+  $("fileinfo").innerHTML =
+    `<div class="row"><span class="k">FILE</span><span>${baseName}.spc</span></div>` + tag +
+    `<div class="row"><span class="k">DIR</span><span>0x${SPC.dir.toString(16).toUpperCase().padStart(4,"0")}</span></div>` +
+    `<div class="row"><span class="k">SAMPLES</span><span>ユニーク ${SAMPLES.length} 個 / 重複 ${DUPES.length} 件を除外</span></div>`;
+  $("fileinfo").style.display = "block";
+}
+
+function drawWave(canvas, pcm, color){
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 90, h = canvas.clientHeight || 26;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const c = canvas.getContext("2d"); c.scale(dpr,dpr);
+  c.clearRect(0,0,w,h); c.strokeStyle = color || "#2f2f3a"; c.lineWidth = 1;
+  c.beginPath();
+  const step = Math.max(1, Math.floor(pcm.length / w));
+  for(let x=0;x<w;x++){
+    let mn=32767, mx=-32768;
+    for(let i=x*step;i<Math.min((x+1)*step,pcm.length);i++){ const v=pcm[i]; if(v<mn)mn=v; if(v>mx)mx=v; }
+    if(mn>mx){mn=0;mx=0;}
+    c.moveTo(x+.5, h/2 - (mx/32768)*(h/2-1));
+    c.lineTo(x+.5, h/2 - (mn/32768)*(h/2-1));
+  }
+  c.stroke();
+}
+
+function renderList(){
+  const el = $("slist"); el.innerHTML = "";
+  updateCap();
+  for(const s of SAMPLES){
+    const row = document.createElement("div"); row.className = "srow";
+    const dur = (s.frames/RATE).toFixed(2);
+    const envBadge = (s.env && s.env.fromDSP)
+      ? `<span class="lp" style="background:var(--sfc-yellow)" title="DSPボイス${s.env.voice}のADSR実測: A ${(s.env.attackSec*1000).toFixed(0)}ms / D ${(s.env.decaySec*1000).toFixed(0)}ms / SL ${s.env.sl+1}/8 / S ${isFinite(s.env.sustainSec)?s.env.sustainSec.toFixed(2)+"s":"∞"} → release ${(s.env.releaseSec).toFixed(2)}s">ADSR</span>`
+      : "";
+    row.innerHTML =
+      `<input type="checkbox" ${SELECTED.has(s.idx)?"checked":""} data-i="${s.idx}">` +
+      `<span class="nm mono">#${String(s.idx).padStart(2,"0")}</span>` +
+      `<span class="lp ${s.loopFlag?"loop":"shot"}">${s.loopFlag?"LOOP":"SHOT"}</span>` + envBadge +
+      `<canvas></canvas>` +
+      `<span class="meta mono">${s.frames}f · ${dur}s</span>` +
+      `<button title="試聴" data-p="${s.idx}">▶</button>`;
+    el.appendChild(row);
+    drawWave(row.querySelector("canvas"), s.pcm);
+    row.querySelector("input").addEventListener("change", ev=>{
+      const i = +ev.target.dataset.i;
+      if(ev.target.checked){
+        if(SELECTED.size >= MAXPADS){ ev.target.checked = false; return; }
+        SELECTED.add(i);
+      } else SELECTED.delete(i);
+      updateCap(); renderPads();
+    });
+    row.querySelector("button").addEventListener("click", ()=> playSample(s));
+  }
+  for(const d of DUPES){
+    const row = document.createElement("div"); row.className = "srow dup mono";
+    row.innerHTML = `<span style="width:16px"></span><span class="nm">#${String(d.idx).padStart(2,"0")}</span>` +
+      `<span class="meta">#${String(d.dupOf).padStart(2,"0")} と同一内容のため除外</span>`;
+    el.appendChild(row);
+  }
+}
+function updateCap(){
+  $("cap").innerHTML = `パッド割当: <b>${SELECTED.size} / ${MAXPADS}</b>(チェックで入替。16パッド×4バンク)`;
+}
+
+const PADCOLORS = ["--sfc-red","--sfc-yellow","--sfc-green","--sfc-blue"];
+const BANKNAMES = ["A","B","C","D"];
+function renderPads(){
+  const grid = $("padgrid"); grid.innerHTML = "";
+  $("padtitle").textContent = `Pad Bank ${BANKNAMES[BANK]} — タップで試聴`;
+  const sel = SAMPLES.filter(s=>SELECTED.has(s.idx));
+  for(let i=0;i<BANKSIZE;i++){
+    const padNo = BANK*BANKSIZE + i;      // グローバルパッド番号 0..63
+    const pad = document.createElement("div");
+    const s = sel[padNo];
+    if(s){
+      pad.className = "pad";
+      const col = getComputedStyle(document.documentElement).getPropertyValue(PADCOLORS[i%4]).trim();
+      pad.innerHTML = `<canvas></canvas><span class="tag" style="background:${col}">${padLabel(s)}</span>`;
+      drawWave(pad.querySelector("canvas"), s.pcm, "#3a3a46");
+      pad.addEventListener("click", ()=> playSample(s, pad));
+    } else {
+      pad.className = "pad empty";
+      pad.innerHTML = `<canvas></canvas><span class="tag">—</span>`;
+    }
+    grid.appendChild(pad);
+  }
+}
+function syncBankTabs(){
+  document.querySelectorAll("#bankseg button").forEach(b=>
+    b.classList.toggle("on", +b.dataset.b === BANK));
+}
+document.querySelectorAll("#bankseg button").forEach(b=>{
+  b.addEventListener("click", ()=>{ BANK = +b.dataset.b; syncBankTabs(); renderPads(); });
+});
+/* リサイズ時に波形を再描画(低解像度の引き伸ばし防止) */
+let rszTimer = null;
+window.addEventListener("resize", ()=>{
+  if(!SAMPLES.length) return;
+  clearTimeout(rszTimer);
+  rszTimer = setTimeout(()=>{ renderPads(); renderList(); }, 200);
+});
+
+/* ===================== 試聴 ===================== */
+function playSample(s, padEl){
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state === "suspended") audioCtx.resume();
+  // ループ音色は最大1秒ぶん繰り返して試聴
+  let pcm = s.pcm;
+  if(s.loopFlag && $("looppad").checked && pcm.length < RATE){
+    const reps = Math.ceil(RATE / pcm.length);
+    const ext = new Int16Array(pcm.length * reps);
+    for(let r=0;r<reps;r++) ext.set(pcm, r*pcm.length);
+    pcm = ext;
+  }
+  const ab = audioCtx.createBuffer(1, pcm.length, RATE);
+  const ch = ab.getChannelData(0);
+  for(let i=0;i<pcm.length;i++) ch[i] = pcm[i] / 32768;
+  const src = audioCtx.createBufferSource();
+  src.buffer = ab; src.connect(audioCtx.destination); src.start();
+  if(padEl){ padEl.classList.add("playing"); src.onended = ()=> padEl.classList.remove("playing"); }
+}
+
+/* ===================== 書き出し ===================== */
+function download(blob, name){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+
+$("dlkoala").addEventListener("click", async ()=>{
+  if(!SELECTED.size) return;
+  const sel = SAMPLES.filter(s=>SELECTED.has(s.idx));
+  const zip = new JSZip();
+  const sampler = zip.folder("sampler");
+  sel.forEach(s=> sampler.file(`${500+s.idx}.wav`, encodeWAV(s.pcm, RATE)));
+  sampler.file("sampler.json", JSON.stringify(buildSamplerJSON(sel, RATE), null, 1));
+  zip.file("mixer.json",    JSON.stringify(MIXER_TPL, null, 1));
+  zip.file("fx.json",       JSON.stringify(FX_TPL, null, 1));
+  zip.file("song.json",     JSON.stringify(buildSongJSON(baseName), null, 1));
+  zip.file("sequence.json", JSON.stringify(buildSequenceJSON(), null, 1));
+  const blob = await zip.generateAsync({type:"blob", compression:"STORE"});
+  download(blob, baseName + ".koala");
+});
+
+$("dlwav").addEventListener("click", async ()=>{
+  const zip = new JSZip();
+  for(const s of SAMPLES){
+    zip.file(`sample_${String(s.idx).padStart(2,"0")}_${s.loopFlag?"loop":"oneshot"}.wav`, encodeWAV(s.pcm, RATE));
+  }
+  const blob = await zip.generateAsync({type:"blob", compression:"STORE"});
+  download(blob, baseName + "_samples.zip");
+});
+</script>
+</body>
+</html>
