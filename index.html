@@ -395,6 +395,22 @@ function fullMixRender(M, u8, rate, seconds){
   }
   return out;
 }
+/* ミュート無しで[startSec,endSec)だけを切り出す版(頭のイントロ区間を捨てて、ループ本体から書き出すため) */
+function fullMixRenderSlice(M, u8, rate, startSec, endSec){
+  engineReload(M, u8, rate);
+  engineMute(M, 0);
+  const endFrame = Math.max(1, Math.round(endSec*rate));
+  const stereo = enginePlay(M, endFrame);
+  const startFrame = Math.max(0, Math.round(startSec*rate));
+  const n = Math.max(1, endFrame - startFrame);
+  const out = new Int16Array(n);
+  for(let i=0;i<n;i++){
+    const si = startFrame + i;
+    const l = stereo[si*2] || 0, r = stereo[si*2+1] || 0;
+    out[i] = (l+r) >> 1;
+  }
+  return out;
+}
 
 /* ===================== ノート抽出(extract_notes.py 移植) ===================== */
 /* flat: Int32Array の [time,addr,data, time,addr,data, ...] 三つ組フラット配列 */
@@ -476,6 +492,43 @@ function findLoopJS(v, binSec, minLoopSec=3.0, maxLoopSec=60.0){
   }
   if(bestLag === null) return null;
   return {sec: bestLag*binSec, score: bestScore};
+}
+
+/* ループ「長さ」Lが決まった後、ループが本当に始まる位置(=イントロの長さ)Sを探す。
+   S以降をLごとに区切って隣り合う窓同士を全部比較し、一番よく一致するSを採用する。 */
+function findLoopStartJS(v, binSec, loopSec, maxIntroSec=30.0){
+  const L = Math.max(1, Math.round(loopSec/binSec));
+  const n = v.length;
+  const maxIntroBins = Math.max(0, Math.min(Math.round(maxIntroSec/binSec), n - 2*L));
+  let bestS = 0, bestScore = -1;
+  for(let S=0; S<=maxIntroBins; S++){
+    const reps = Math.floor((n - S) / L);
+    if(reps < 2) break;
+    let num=0, aa=0, bb=0;
+    for(let r=0; r<reps-1; r++){
+      const base = S + r*L;
+      for(let i=0;i<L;i++){
+        const a = v[base + i], b = v[base + L + i];
+        num += a*b; aa += a*a; bb += b*b;
+      }
+    }
+    const denom = Math.sqrt(aa*bb);
+    if(denom === 0) continue;
+    const score = num/denom;
+    if(score > bestScore){ bestScore = score; bestS = S; }
+  }
+  return {startBin: bestS, score: bestScore};
+}
+/* 粗いビン単位で見つけたループ開始位置を、実際に一番近いノート発音タイミングにスナップする。
+   ノートの途中でループ頭を切ってプチノイズになるのを防ぐため。 */
+function snapToNearestNoteTime(notes, targetSec, windowSec){
+  let best = targetSec, bestDist = Infinity;
+  for(const n of notes){
+    const t = n.start / CLOCK_RATE;
+    const d = Math.abs(t - targetSec);
+    if(d < bestDist && d <= windowSec){ bestDist = d; best = t; }
+  }
+  return best;
 }
 
 /* ===================== WAV エンコード ===================== */
@@ -644,7 +697,14 @@ async function runDspCapture(){
     const binSec = 0.02;
     const v = onsetVector(notes, binSec, capSec);
     const found = notes.length ? findLoopJS(v, binSec) : null;
-    LOOP_INFO = found || {sec: capSec, score: 0};
+    if(found){
+      const startResult = findLoopStartJS(v, binSec, found.sec);
+      let introSec = startResult.startBin * binSec;
+      introSec = snapToNearestNoteTime(notes, introSec, binSec*1.5);
+      LOOP_INFO = {sec: found.sec, score: found.score, introSec, startScore: startResult.score};
+    } else {
+      LOOP_INFO = {sec: capSec, score: 0, introSec: 0, startScore: 0};
+    }
 
     // 重複マップ(dup idx -> canonical idx)
     const dupeMap = new Map(DUPES.map(d=>[d.idx, d.dupOf]));
@@ -678,9 +738,9 @@ async function runDspCapture(){
       }
     }
 
-    // 曲全体(ループ長ぶん)を1本のpad用サンプルとして書き出す
-    setStatus(`曲全体(${LOOP_INFO.sec.toFixed(2)}秒)をレンダリング中…`);
-    const fullPcm = fullMixRender(M, RAW_BYTES, RATE, LOOP_INFO.sec + 0.2);
+    // 曲全体(イントロを飛ばし、ループ本体の開始点からループ長ぶん)を1本のpad用サンプルとして書き出す
+    setStatus(`曲全体(イントロ${LOOP_INFO.introSec.toFixed(2)}秒を省略し、ループ本体${LOOP_INFO.sec.toFixed(2)}秒)をレンダリング中…`);
+    const fullPcm = fullMixRenderSlice(M, RAW_BYTES, RATE, LOOP_INFO.introSec, LOOP_INFO.introSec + LOOP_INFO.sec + 0.2);
     const fullSample = {idx:"FULL", loopFlag:false, forceOneshot:true, isFullMix:true,
                          frames:fullPcm.length, pcm:fullPcm, bytes:0};
     fullSample.env = typicalEnv(false);
@@ -711,7 +771,7 @@ function renderInfo(){
     ? `<div class="row"><span class="k">ID666</span><span>${[t.song,t.game,t.artist].filter(Boolean).join(" / ")}</span></div>`
     : `<div class="row"><span class="k">ID666</span><span>タグなし</span></div>`;
   const loopRow = LOOP_INFO
-    ? `<div class="row"><span class="k">LOOP</span><span>${LOOP_INFO.sec.toFixed(3)}秒(自己相関スコア ${LOOP_INFO.score.toFixed(3)})</span></div>`
+    ? `<div class="row"><span class="k">LOOP</span><span>イントロ ${(LOOP_INFO.introSec||0).toFixed(3)}秒 + ループ本体 ${LOOP_INFO.sec.toFixed(3)}秒(長さスコア ${LOOP_INFO.score.toFixed(3)} / 開始点スコア ${(LOOP_INFO.startScore||0).toFixed(3)})</span></div>`
     : "";
   $("fileinfo").innerHTML =
     `<div class="row"><span class="k">FILE</span><span>${baseName}.spc</span></div>` + tag +
