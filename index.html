@@ -119,6 +119,20 @@ else if (typeof exports === 'object')
   .lp{font-size:9.5px; font-weight:800; color:#fff; border-radius:4px; padding:2px 5px;}
   .lp.loop{background:var(--sfc-blue);} .lp.shot{background:var(--sfc-green);}
 
+  /* ── ループエディタ(候補提示 + 手動確定) ── */
+  #loopeditor{display:none; margin-top:22px;}
+  #loopeditor h2{font-size:12px; letter-spacing:.22em; color:var(--ink-soft);
+    margin-bottom:10px; text-transform:uppercase;}
+  #loopcanvas{cursor:ew-resize;}
+  .ebtn{border:2px solid var(--ink); background:var(--panel); color:var(--ink);
+    padding:8px 12px; font-size:12px; font-weight:700; border-radius:8px; cursor:pointer;}
+  .ebtn:active{transform:translateY(1px);}
+  #loopreadout .row{display:flex; gap:8px; flex-wrap:wrap;}
+  #loopreadout .k{color:var(--ink-soft); min-width:3.2em; display:inline-block;}
+  #loopreadout .legend{display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;}
+  #loopreadout .legend span{display:inline-flex; align-items:center; gap:4px; font-size:11px; color:var(--ink-soft);}
+  #loopreadout .legend i{width:10px;height:10px;border-radius:2px;display:inline-block;}
+
   /* ── ダウンロード ── */
   #dlsec{display:none; margin-top:26px; gap:10px; flex-wrap:wrap;}
   #dlsec.on{display:flex;}
@@ -162,6 +176,23 @@ else if (typeof exports === 'object')
     <label class="chk"><input type="checkbox" id="useenv" checked>ADSRエンベロープ適用(DSP実測 / 無ければ典型値)</label>
     <label class="chk">解析秒数<input type="number" id="capsec" value="120" min="10" max="300" step="10" style="width:4.5em;margin-left:5px;"></label>
   </div>
+
+  <section id="loopeditor">
+    <h2>ループ編集 — 候補提示 + 手動確定</h2>
+    <p style="font-size:11.5px;color:var(--ink-soft);margin-bottom:8px;line-height:1.6;">
+      縦線はチャンネルごとに検出された「候補ループ長」の位置です(色=チャンネル、濃さ=自己相関スコア)。
+      チャンネルによってループの長さは揃わないことがあるため、太い3本の線(<b>IN</b>=イントロ開始 / <b>LS</b>=ループ開始 / <b>LE</b>=ループ終了)を
+      ドラッグし、実際に試聴しながら位置を決めてください。近くの候補にスナップします。
+    </p>
+    <canvas id="loopcanvas" style="width:100%;height:130px;background:#eceef0;border-radius:8px;display:block;touch-action:none;"></canvas>
+    <div id="loopreadout" class="mono"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+      <button class="ebtn" id="playIntroLoop">▶ イントロ→ループ開始</button>
+      <button class="ebtn" id="playSeam">▶ ループ終端→開始(継ぎ目)</button>
+      <button class="ebtn" id="playFull">▶ 候補区間を通しで</button>
+    </div>
+    <button class="big" id="applyLoop" style="margin-top:12px;background:var(--sfc-green);width:100%;">この位置で確定してFULLサンプルに反映</button>
+  </section>
 
   <section id="padsec">
     <h2 id="padtitle">Pad Bank A — タップで試聴</h2>
@@ -395,22 +426,6 @@ function fullMixRender(M, u8, rate, seconds){
   }
   return out;
 }
-/* ミュート無しで[startSec,endSec)だけを切り出す版(頭のイントロ区間を捨てて、ループ本体から書き出すため) */
-function fullMixRenderSlice(M, u8, rate, startSec, endSec){
-  engineReload(M, u8, rate);
-  engineMute(M, 0);
-  const endFrame = Math.max(1, Math.round(endSec*rate));
-  const stereo = enginePlay(M, endFrame);
-  const startFrame = Math.max(0, Math.round(startSec*rate));
-  const n = Math.max(1, endFrame - startFrame);
-  const out = new Int16Array(n);
-  for(let i=0;i<n;i++){
-    const si = startFrame + i;
-    const l = stereo[si*2] || 0, r = stereo[si*2+1] || 0;
-    out[i] = (l+r) >> 1;
-  }
-  return out;
-}
 
 /* ===================== ノート抽出(extract_notes.py 移植) ===================== */
 /* flat: Int32Array の [time,addr,data, time,addr,data, ...] 三つ組フラット配列 */
@@ -494,41 +509,19 @@ function findLoopJS(v, binSec, minLoopSec=3.0, maxLoopSec=60.0){
   return {sec: bestLag*binSec, score: bestScore};
 }
 
-/* ループ「長さ」Lが決まった後、ループが本当に始まる位置(=イントロの長さ)Sを探す。
-   S以降をLごとに区切って隣り合う窓同士を全部比較し、一番よく一致するSを採用する。 */
-function findLoopStartJS(v, binSec, loopSec, maxIntroSec=30.0){
-  const L = Math.max(1, Math.round(loopSec/binSec));
-  const n = v.length;
-  const maxIntroBins = Math.max(0, Math.min(Math.round(maxIntroSec/binSec), n - 2*L));
-  let bestS = 0, bestScore = -1;
-  for(let S=0; S<=maxIntroBins; S++){
-    const reps = Math.floor((n - S) / L);
-    if(reps < 2) break;
-    let num=0, aa=0, bb=0;
-    for(let r=0; r<reps-1; r++){
-      const base = S + r*L;
-      for(let i=0;i<L;i++){
-        const a = v[base + i], b = v[base + L + i];
-        num += a*b; aa += a*a; bb += b*b;
-      }
-    }
-    const denom = Math.sqrt(aa*bb);
-    if(denom === 0) continue;
-    const score = num/denom;
-    if(score > bestScore){ bestScore = score; bestS = S; }
+/* チャンネルごとに個別で自己相関を取り、候補ループ長を出す。
+   (全チャンネルを混ぜた findLoopJS だけだと、チャンネル間のズレが均されて
+    誤検出の原因になるため、混ぜずに1本ずつ見る) */
+function perChannelCandidates(notes, binSec, capSec){
+  const out = [];
+  for(let vi=0; vi<8; vi++){
+    const chNotes = notes.filter(n=>n.voice===vi);
+    if(chNotes.length < 4) continue; // ノートが少なすぎるチャンネルは候補として出さない
+    const v = onsetVector(chNotes, binSec, capSec);
+    const found = findLoopJS(v, binSec);
+    if(found) out.push({voice:vi, sec:found.sec, score:Math.max(0,found.score), noteCount:chNotes.length});
   }
-  return {startBin: bestS, score: bestScore};
-}
-/* 粗いビン単位で見つけたループ開始位置を、実際に一番近いノート発音タイミングにスナップする。
-   ノートの途中でループ頭を切ってプチノイズになるのを防ぐため。 */
-function snapToNearestNoteTime(notes, targetSec, windowSec){
-  let best = targetSec, bestDist = Infinity;
-  for(const n of notes){
-    const t = n.start / CLOCK_RATE;
-    const d = Math.abs(t - targetSec);
-    if(d < bestDist && d <= windowSec){ bestDist = d; best = t; }
-  }
-  return best;
+  return out;
 }
 
 /* ===================== WAV エンコード ===================== */
@@ -603,8 +596,11 @@ const BANKSIZE = 16;
 let BANK = 0;            // 表示中バンク 0..3
 let ENVMAP = new Map();  // SRCN → DSP実測エンベロープ
 let audioCtx = null;
-let LOOP_INFO = null;    // {sec, score} 検出されたループ長
+let LOOP_INFO = null;    // {sec, score} 検出されたループ長(表示用の代表値)
 let RAW_BYTES = null;    // 元SPCファイルのバイト列(エンジン再ロード用)
+let LOOP_EDIT = null;    // {capSec, pcm, candidates, introStart, loopStart, loopEnd} ループ編集状態
+let LOOP_DRAG = null;    // ドラッグ中のハンドル: "intro" | "start" | "end" | null
+const VOICE_COLORS = ["#e6402a","#f0a800","#159a54","#1c6bb8","#8e44ad","#16a085","#d35400","#7f8c8d"];
 
 function padLabel(s){
   if(s.idx === "FULL") return `${baseName}_FULL`;
@@ -697,14 +693,11 @@ async function runDspCapture(){
     const binSec = 0.02;
     const v = onsetVector(notes, binSec, capSec);
     const found = notes.length ? findLoopJS(v, binSec) : null;
-    if(found){
-      const startResult = findLoopStartJS(v, binSec, found.sec);
-      let introSec = startResult.startBin * binSec;
-      introSec = snapToNearestNoteTime(notes, introSec, binSec*1.5);
-      LOOP_INFO = {sec: found.sec, score: found.score, introSec, startScore: startResult.score};
-    } else {
-      LOOP_INFO = {sec: capSec, score: 0, introSec: 0, startScore: 0};
-    }
+    LOOP_INFO = found || {sec: capSec, score: 0};
+
+    // チャンネルごとに個別の自己相関を取り、候補ループ長を出す
+    // (全チャンネルを混ぜた findLoopJS だけでは誤検出しやすいため、編集の手がかりとして提示する)
+    const channelCandidates = notes.length ? perChannelCandidates(notes, binSec, capSec) : [];
 
     // 重複マップ(dup idx -> canonical idx)
     const dupeMap = new Map(DUPES.map(d=>[d.idx, d.dupOf]));
@@ -738,11 +731,13 @@ async function runDspCapture(){
       }
     }
 
-    // 曲全体(イントロを飛ばし、ループ本体の開始点からループ長ぶん)を1本のpad用サンプルとして書き出す
-    setStatus(`曲全体(イントロ${LOOP_INFO.introSec.toFixed(2)}秒を省略し、ループ本体${LOOP_INFO.sec.toFixed(2)}秒)をレンダリング中…`);
-    const fullPcm = fullMixRenderSlice(M, RAW_BYTES, RATE, LOOP_INFO.introSec, LOOP_INFO.introSec + LOOP_INFO.sec + 0.2);
+    // 波形全体(解析秒数ぶん)を1回だけレンダリングし、初期FULLサンプルとループエディタの両方に使い回す
+    setStatus(`波形全体(${capSec}秒)をレンダリング中…`);
+    const fullCapPcm = fullMixRender(M, RAW_BYTES, RATE, capSec);
+    const initialLen = Math.min(capSec, LOOP_INFO.sec + 0.2);
+    const initialPcm = fullCapPcm.slice(0, Math.round(initialLen*RATE));
     const fullSample = {idx:"FULL", loopFlag:false, forceOneshot:true, isFullMix:true,
-                         frames:fullPcm.length, pcm:fullPcm, bytes:0};
+                         frames:initialPcm.length, pcm:initialPcm, bytes:0};
     fullSample.env = typicalEnv(false);
     SAMPLES.push(fullSample);
 
@@ -753,6 +748,9 @@ async function runDspCapture(){
     const shots = rest.filter(s=>!s.loopFlag).sort((a,b)=>b.bytes-a.bytes);
     const loops = rest.filter(s=> s.loopFlag).sort((a,b)=>b.bytes-a.bytes);
     for(const s of [...shots, ...loops]){ if(SELECTED.size < MAXPADS) SELECTED.add(s.idx); }
+
+    // ループ編集UIを初期化(候補提示 + 手動確定はここから行う)
+    initLoopEditor(fullCapPcm, capSec, channelCandidates);
 
     setStatus(null);
     renderInfo(); renderList(); renderPads();
@@ -771,7 +769,9 @@ function renderInfo(){
     ? `<div class="row"><span class="k">ID666</span><span>${[t.song,t.game,t.artist].filter(Boolean).join(" / ")}</span></div>`
     : `<div class="row"><span class="k">ID666</span><span>タグなし</span></div>`;
   const loopRow = LOOP_INFO
-    ? `<div class="row"><span class="k">LOOP</span><span>イントロ ${(LOOP_INFO.introSec||0).toFixed(3)}秒 + ループ本体 ${LOOP_INFO.sec.toFixed(3)}秒(長さスコア ${LOOP_INFO.score.toFixed(3)} / 開始点スコア ${(LOOP_INFO.startScore||0).toFixed(3)})</span></div>`
+    ? (LOOP_INFO.introSec !== undefined
+        ? `<div class="row"><span class="k">LOOP</span><span>イントロ ${LOOP_INFO.introSec.toFixed(3)}秒 + ループ ${LOOP_INFO.sec.toFixed(3)}秒(下のループ編集で手動確定済み)</span></div>`
+        : `<div class="row"><span class="k">LOOP</span><span>${LOOP_INFO.sec.toFixed(3)}秒(自己相関スコア ${LOOP_INFO.score.toFixed(3)}・未確定 — 下のループ編集で確認してください)</span></div>`)
     : "";
   $("fileinfo").innerHTML =
     `<div class="row"><span class="k">FILE</span><span>${baseName}.spc</span></div>` + tag +
@@ -886,6 +886,192 @@ window.addEventListener("resize", ()=>{
   if(!SAMPLES.length) return;
   clearTimeout(rszTimer);
   rszTimer = setTimeout(()=>{ renderPads(); renderList(); }, 200);
+});
+
+/* ===================== ループエディタ(候補提示 + 手動確定) ===================== */
+function initLoopEditor(pcm, capSec, candidates){
+  const defaultLen = (LOOP_INFO && LOOP_INFO.sec) ? LOOP_INFO.sec : Math.min(capSec, 30);
+  LOOP_EDIT = {
+    capSec, pcm, candidates,
+    introStart: 0,
+    loopStart: 0,
+    loopEnd: Math.min(capSec, defaultLen),
+  };
+  $("loopeditor").style.display = "block";
+  drawLoopEditor();
+  updateLoopReadout();
+}
+
+function drawLoopEditor(){
+  if(!LOOP_EDIT) return;
+  const canvas = $("loopcanvas");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 700, h = canvas.clientHeight || 130;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const c = canvas.getContext("2d"); c.setTransform(dpr,0,0,dpr,0,0);
+  c.clearRect(0,0,w,h);
+
+  const {pcm, capSec, candidates, introStart, loopStart, loopEnd} = LOOP_EDIT;
+  const secToX = sec => (sec/capSec)*w;
+
+  // 波形(モノラル全体)
+  c.strokeStyle = "#2f2f3a"; c.lineWidth = 1; c.beginPath();
+  const step = Math.max(1, Math.floor(pcm.length / w));
+  for(let x=0;x<w;x++){
+    let mn=32767, mx=-32768;
+    for(let i=x*step;i<Math.min((x+1)*step,pcm.length);i++){ const v=pcm[i]; if(v<mn)mn=v; if(v>mx)mx=v; }
+    if(mn>mx){mn=0;mx=0;}
+    c.moveTo(x+.5, h/2 - (mx/32768)*(h/2-1));
+    c.lineTo(x+.5, h/2 - (mn/32768)*(h/2-1));
+  }
+  c.stroke();
+
+  // チャンネル別ループ候補(色分けした縦線。濃さ=自己相関スコア)
+  for(const cand of candidates){
+    const x = secToX(cand.sec);
+    c.strokeStyle = VOICE_COLORS[cand.voice];
+    c.globalAlpha = 0.30 + Math.max(0, Math.min(1, cand.score)) * 0.55;
+    c.lineWidth = 2;
+    c.beginPath(); c.moveTo(x, 14); c.lineTo(x, h); c.stroke();
+  }
+  c.globalAlpha = 1;
+
+  // イントロ開始 / ループ開始 / ループ終了(太い3本の可動ハンドル)
+  const drawHandle = (sec, color, label) => {
+    const x = secToX(sec);
+    c.strokeStyle = color; c.lineWidth = 3;
+    c.beginPath(); c.moveTo(x, 0); c.lineTo(x, h); c.stroke();
+    c.fillStyle = color; c.font = "bold 10px sans-serif";
+    c.fillText(label, Math.min(w-16, x+3), 11);
+  };
+  drawHandle(introStart, "#000", "IN");
+  drawHandle(loopStart, "#1c6bb8", "LS");
+  drawHandle(loopEnd, "#e6402a", "LE");
+}
+
+function updateLoopReadout(){
+  if(!LOOP_EDIT) return;
+  const {introStart, loopStart, loopEnd, candidates} = LOOP_EDIT;
+  const legend = candidates.map(c=>
+    `<span><i style="background:${VOICE_COLORS[c.voice]}"></i>Ch${c.voice+1}: ${c.sec.toFixed(3)}s (score ${c.score.toFixed(2)})</span>`
+  ).join("");
+  $("loopreadout").innerHTML =
+    `<div class="row"><span class="k">IN</span><span>${introStart.toFixed(3)}秒</span>` +
+    `<span class="k">LS</span><span>${loopStart.toFixed(3)}秒</span>` +
+    `<span class="k">LE</span><span>${loopEnd.toFixed(3)}秒</span>` +
+    `<span class="k">ループ長</span><span>${(loopEnd-loopStart).toFixed(3)}秒</span></div>` +
+    `<div class="legend">${legend}</div>`;
+}
+
+/* ハンドルのドラッグ操作(近くの候補にスナップ) */
+function loopHandleAt(px, canvas){
+  if(!LOOP_EDIT) return null;
+  const w = canvas.clientWidth;
+  const {capSec, introStart, loopStart, loopEnd} = LOOP_EDIT;
+  const xOf = sec => (sec/capSec)*w;
+  const handles = [["intro",introStart],["start",loopStart],["end",loopEnd]];
+  let best = null, bestDist = 10; // 10px以内なら掴む
+  for(const [name, sec] of handles){
+    const d = Math.abs(xOf(sec) - px);
+    if(d < bestDist){ bestDist = d; best = name; }
+  }
+  return best;
+}
+function snapToCandidate(sec, canvas){
+  if(!LOOP_EDIT) return sec;
+  const w = canvas.clientWidth;
+  const pxPerSec = w / LOOP_EDIT.capSec;
+  let best = sec, bestDist = 6 / pxPerSec; // 6px以内ならスナップ
+  for(const cand of LOOP_EDIT.candidates){
+    const d = Math.abs(cand.sec - sec);
+    if(d < bestDist){ bestDist = d; best = cand.sec; }
+  }
+  return best;
+}
+(function setupLoopEditorInteraction(){
+  const canvas = $("loopcanvas");
+  const pxToSec = (clientX) => {
+    const rect = canvas.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return frac * LOOP_EDIT.capSec;
+  };
+  canvas.addEventListener("pointerdown", e=>{
+    if(!LOOP_EDIT) return;
+    const rect = canvas.getBoundingClientRect();
+    LOOP_DRAG = loopHandleAt(e.clientX - rect.left, canvas);
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", e=>{
+    if(!LOOP_EDIT || !LOOP_DRAG) return;
+    let sec = pxToSec(e.clientX);
+    sec = snapToCandidate(sec, canvas);
+    const ed = LOOP_EDIT;
+    if(LOOP_DRAG === "intro"){ ed.introStart = Math.max(0, Math.min(sec, ed.loopStart)); }
+    else if(LOOP_DRAG === "start"){ ed.loopStart = Math.max(ed.introStart, Math.min(sec, ed.loopEnd)); }
+    else if(LOOP_DRAG === "end"){ ed.loopEnd = Math.max(ed.loopStart, Math.min(sec, ed.capSec)); }
+    drawLoopEditor(); updateLoopReadout();
+  });
+  ["pointerup","pointercancel"].forEach(ev=> canvas.addEventListener(ev, ()=>{ LOOP_DRAG = null; }));
+  window.addEventListener("resize", ()=>{ if(LOOP_EDIT) drawLoopEditor(); });
+})();
+
+/* 候補区間を切り出して再生する共通ヘルパ */
+function playPcmSlice(pcm, startSec, endSec){
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state === "suspended") audioCtx.resume();
+  const s = Math.max(0, Math.round(startSec*RATE));
+  const en = Math.max(s+1, Math.min(pcm.length, Math.round(endSec*RATE)));
+  const slice = pcm.subarray(s, en);
+  const ab = audioCtx.createBuffer(1, slice.length, RATE);
+  const ch = ab.getChannelData(0);
+  for(let i=0;i<slice.length;i++) ch[i] = slice[i] / 32768;
+  const src = audioCtx.createBufferSource();
+  src.buffer = ab; src.connect(audioCtx.destination); src.start();
+}
+/* イントロ→ループ開始の継ぎ目(切り替わりが不自然でないか)を試聴 */
+$("playIntroLoop").addEventListener("click", ()=>{
+  if(!LOOP_EDIT) return;
+  const {pcm, introStart, loopStart} = LOOP_EDIT;
+  playPcmSlice(pcm, Math.max(0, loopStart-2.5), Math.min(LOOP_EDIT.capSec, loopStart+2.5));
+});
+/* ループ終端→開始の継ぎ目(ループが自然に繋がるか)を試聴 */
+$("playSeam").addEventListener("click", ()=>{
+  if(!LOOP_EDIT) return;
+  const {pcm, loopStart, loopEnd} = LOOP_EDIT;
+  const before = pcm.subarray(Math.max(0, Math.round((loopEnd-2.5)*RATE)), Math.round(loopEnd*RATE));
+  const after = pcm.subarray(Math.round(loopStart*RATE), Math.round(Math.min(LOOP_EDIT.capSec, loopStart+2.5)*RATE));
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state === "suspended") audioCtx.resume();
+  const ab = audioCtx.createBuffer(1, before.length+after.length, RATE);
+  const ch = ab.getChannelData(0);
+  for(let i=0;i<before.length;i++) ch[i] = before[i]/32768;
+  for(let i=0;i<after.length;i++) ch[before.length+i] = after[i]/32768;
+  const src = audioCtx.createBufferSource();
+  src.buffer = ab; src.connect(audioCtx.destination); src.start();
+});
+/* イントロ〜ループ終了までを通しで試聴 */
+$("playFull").addEventListener("click", ()=>{
+  if(!LOOP_EDIT) return;
+  playPcmSlice(LOOP_EDIT.pcm, LOOP_EDIT.introStart, LOOP_EDIT.loopEnd);
+});
+/* 確定してFULLサンプルに反映 */
+$("applyLoop").addEventListener("click", ()=>{
+  if(!LOOP_EDIT) return;
+  const {pcm, introStart, loopEnd} = LOOP_EDIT;
+  const s = Math.max(0, Math.round(introStart*RATE));
+  const en = Math.max(s+1, Math.round(loopEnd*RATE));
+  const sliced = pcm.slice(s, en);
+  let fullSample = SAMPLES.find(x=>x.idx==="FULL");
+  if(!fullSample){
+    fullSample = {idx:"FULL", loopFlag:false, forceOneshot:true, isFullMix:true, env:typicalEnv(false)};
+    SAMPLES.push(fullSample);
+    SELECTED.add("FULL");
+  }
+  fullSample.pcm = sliced; fullSample.frames = sliced.length; fullSample.bytes = 0;
+  LOOP_INFO = {sec: (LOOP_EDIT.loopEnd - LOOP_EDIT.loopStart), score: LOOP_INFO ? LOOP_INFO.score : 0, introSec: LOOP_EDIT.introStart};
+  setStatus("この位置でFULLサンプルを更新しました");
+  setTimeout(()=>setStatus(null), 2000);
+  renderInfo(); renderList(); renderPads();
 });
 
 /* ===================== 試聴 ===================== */
