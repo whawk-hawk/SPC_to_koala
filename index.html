@@ -181,15 +181,13 @@ else if (typeof exports === 'object')
     <h2>ループ編集 — 候補提示 + 手動確定</h2>
     <p style="font-size:11.5px;color:var(--ink-soft);margin-bottom:8px;line-height:1.6;">
       縦線はチャンネルごとに検出された「候補ループ長」の位置です(色=チャンネル、濃さ=自己相関スコア)。
-      チャンネルによってループの長さは揃わないことがあるため、太い3本の線(<b>IN</b>=イントロ開始 / <b>LS</b>=ループ開始 / <b>LE</b>=ループ終了)を
+      チャンネルによってループの長さは揃わないことがあるため、太い2本の線(<b>LS</b>=ループ開始 / <b>LE</b>=ループ終了)を
       ドラッグし、実際に試聴しながら位置を決めてください。近くの候補にスナップします。
     </p>
     <canvas id="loopcanvas" style="width:100%;height:130px;background:#eceef0;border-radius:8px;display:block;touch-action:none;"></canvas>
     <div id="loopreadout" class="mono"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
-      <button class="ebtn" id="playIntroLoop">▶ イントロ→ループ開始</button>
-      <button class="ebtn" id="playSeam">▶ ループ終端→開始(継ぎ目)</button>
-      <button class="ebtn" id="playFull">▶ 候補区間を通しで</button>
+      <button class="ebtn" id="loopPlayToggle">▶ スタート</button>
     </div>
     <button class="big" id="applyLoop" style="margin-top:12px;background:var(--sfc-green);width:100%;">この位置で確定してFULLサンプルに反映</button>
   </section>
@@ -599,7 +597,7 @@ let audioCtx = null;
 let LOOP_INFO = null;    // {sec, score} 検出されたループ長(表示用の代表値)
 let RAW_BYTES = null;    // 元SPCファイルのバイト列(エンジン再ロード用)
 let LOOP_EDIT = null;    // {capSec, pcm, candidates, introStart, loopStart, loopEnd} ループ編集状態
-let LOOP_DRAG = null;    // ドラッグ中のハンドル: "intro" | "start" | "end" | null
+let LOOP_DRAG = null;    // ドラッグ中のハンドル: "start" | "end" | null
 const VOICE_COLORS = ["#e6402a","#f0a800","#159a54","#1c6bb8","#8e44ad","#16a085","#d35400","#7f8c8d"];
 
 function padLabel(s){
@@ -890,6 +888,7 @@ window.addEventListener("resize", ()=>{
 
 /* ===================== ループエディタ(候補提示 + 手動確定) ===================== */
 function initLoopEditor(pcm, capSec, candidates){
+  stopLoopPreview();
   const defaultLen = (LOOP_INFO && LOOP_INFO.sec) ? LOOP_INFO.sec : Math.min(capSec, 30);
   LOOP_EDIT = {
     capSec, pcm, candidates,
@@ -911,7 +910,7 @@ function drawLoopEditor(){
   const c = canvas.getContext("2d"); c.setTransform(dpr,0,0,dpr,0,0);
   c.clearRect(0,0,w,h);
 
-  const {pcm, capSec, candidates, introStart, loopStart, loopEnd} = LOOP_EDIT;
+  const {pcm, capSec, candidates, loopStart, loopEnd} = LOOP_EDIT;
   const secToX = sec => (sec/capSec)*w;
 
   // 波形(モノラル全体)
@@ -936,7 +935,7 @@ function drawLoopEditor(){
   }
   c.globalAlpha = 1;
 
-  // イントロ開始 / ループ開始 / ループ終了(太い3本の可動ハンドル)
+  // ループ開始 / ループ終了(太い2本の可動ハンドル。イントロ(IN)は廃止し常に0秒固定)
   const drawHandle = (sec, color, label) => {
     const x = secToX(sec);
     c.strokeStyle = color; c.lineWidth = 3;
@@ -944,21 +943,19 @@ function drawLoopEditor(){
     c.fillStyle = color; c.font = "bold 10px sans-serif";
     c.fillText(label, Math.min(w-16, x+3), 11);
   };
-  drawHandle(introStart, "#000", "IN");
   drawHandle(loopStart, "#1c6bb8", "LS");
   drawHandle(loopEnd, "#e6402a", "LE");
 }
 
 function updateLoopReadout(){
   if(!LOOP_EDIT) return;
-  const {introStart, loopStart, loopEnd, candidates} = LOOP_EDIT;
+  const {loopStart, loopEnd, candidates} = LOOP_EDIT;
   const legend = candidates.map(c=>
     `<span><i style="background:${VOICE_COLORS[c.voice]}"></i>Ch${c.voice+1}: ${c.sec.toFixed(3)}s (score ${c.score.toFixed(2)})</span>`
   ).join("");
   $("loopreadout").innerHTML =
-    `<div class="row"><span class="k">IN</span><span>${introStart.toFixed(3)}秒</span>` +
-    `<span class="k">LS</span><span>${loopStart.toFixed(3)}秒</span>` +
-    `<span class="k">LE</span><span>${loopEnd.toFixed(3)}秒</span>` +
+    `<div class="row"><span class="k">LS(ループ開始)</span><span>${loopStart.toFixed(3)}秒</span>` +
+    `<span class="k">LE(ループ終了)</span><span>${loopEnd.toFixed(3)}秒</span>` +
     `<span class="k">ループ長</span><span>${(loopEnd-loopStart).toFixed(3)}秒</span></div>` +
     `<div class="legend">${legend}</div>`;
 }
@@ -967,9 +964,9 @@ function updateLoopReadout(){
 function loopHandleAt(px, canvas){
   if(!LOOP_EDIT) return null;
   const w = canvas.clientWidth;
-  const {capSec, introStart, loopStart, loopEnd} = LOOP_EDIT;
+  const {capSec, loopStart, loopEnd} = LOOP_EDIT;
   const xOf = sec => (sec/capSec)*w;
-  const handles = [["intro",introStart],["start",loopStart],["end",loopEnd]];
+  const handles = [["start",loopStart],["end",loopEnd]];
   let best = null, bestDist = 10; // 10px以内なら掴む
   for(const [name, sec] of handles){
     const d = Math.abs(xOf(sec) - px);
@@ -999,6 +996,7 @@ function snapToCandidate(sec, canvas){
     if(!LOOP_EDIT) return;
     const rect = canvas.getBoundingClientRect();
     LOOP_DRAG = loopHandleAt(e.clientX - rect.left, canvas);
+    if(LOOP_DRAG) stopLoopPreview();
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("pointermove", e=>{
@@ -1006,8 +1004,7 @@ function snapToCandidate(sec, canvas){
     let sec = pxToSec(e.clientX);
     sec = snapToCandidate(sec, canvas);
     const ed = LOOP_EDIT;
-    if(LOOP_DRAG === "intro"){ ed.introStart = Math.max(0, Math.min(sec, ed.loopStart)); }
-    else if(LOOP_DRAG === "start"){ ed.loopStart = Math.max(ed.introStart, Math.min(sec, ed.loopEnd)); }
+    if(LOOP_DRAG === "start"){ ed.loopStart = Math.max(0, Math.min(sec, ed.loopEnd)); }
     else if(LOOP_DRAG === "end"){ ed.loopEnd = Math.max(ed.loopStart, Math.min(sec, ed.capSec)); }
     drawLoopEditor(); updateLoopReadout();
   });
@@ -1015,44 +1012,41 @@ function snapToCandidate(sec, canvas){
   window.addEventListener("resize", ()=>{ if(LOOP_EDIT) drawLoopEditor(); });
 })();
 
-/* 候補区間を切り出して再生する共通ヘルパ */
-function playPcmSlice(pcm, startSec, endSec){
+/* ループ試聴: LS→LEを繰り返し再生するトグル(スタート/ストップ)。
+   再生中の音源は1つだけを保持し、新規再生の前に必ず止めることで多重再生を防ぐ。 */
+let loopPreviewSource = null;
+function setLoopPlayButtonUI(playing){
+  const btn = $("loopPlayToggle");
+  if(!btn) return;
+  btn.textContent = playing ? "⏸ ストップ" : "▶ スタート";
+}
+function stopLoopPreview(){
+  if(loopPreviewSource){
+    try{ loopPreviewSource.onended = null; loopPreviewSource.stop(); }catch(e){}
+    try{ loopPreviewSource.disconnect(); }catch(e){}
+    loopPreviewSource = null;
+  }
+  setLoopPlayButtonUI(false);
+}
+function startLoopPreview(){
+  if(!LOOP_EDIT) return;
+  stopLoopPreview();
   if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
   if(audioCtx.state === "suspended") audioCtx.resume();
-  const s = Math.max(0, Math.round(startSec*RATE));
-  const en = Math.max(s+1, Math.min(pcm.length, Math.round(endSec*RATE)));
+  const {pcm, loopStart, loopEnd} = LOOP_EDIT;
+  const s = Math.max(0, Math.round(loopStart*RATE));
+  const en = Math.max(s+1, Math.round(loopEnd*RATE));
   const slice = pcm.subarray(s, en);
   const ab = audioCtx.createBuffer(1, slice.length, RATE);
   const ch = ab.getChannelData(0);
   for(let i=0;i<slice.length;i++) ch[i] = slice[i] / 32768;
   const src = audioCtx.createBufferSource();
-  src.buffer = ab; src.connect(audioCtx.destination); src.start();
+  src.buffer = ab; src.loop = true; src.connect(audioCtx.destination); src.start();
+  loopPreviewSource = src;
+  setLoopPlayButtonUI(true);
 }
-/* イントロ→ループ開始の継ぎ目(切り替わりが不自然でないか)を試聴 */
-$("playIntroLoop").addEventListener("click", ()=>{
-  if(!LOOP_EDIT) return;
-  const {pcm, introStart, loopStart} = LOOP_EDIT;
-  playPcmSlice(pcm, Math.max(0, loopStart-2.5), Math.min(LOOP_EDIT.capSec, loopStart+2.5));
-});
-/* ループ終端→開始の継ぎ目(ループが自然に繋がるか)を試聴 */
-$("playSeam").addEventListener("click", ()=>{
-  if(!LOOP_EDIT) return;
-  const {pcm, loopStart, loopEnd} = LOOP_EDIT;
-  const before = pcm.subarray(Math.max(0, Math.round((loopEnd-2.5)*RATE)), Math.round(loopEnd*RATE));
-  const after = pcm.subarray(Math.round(loopStart*RATE), Math.round(Math.min(LOOP_EDIT.capSec, loopStart+2.5)*RATE));
-  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-  if(audioCtx.state === "suspended") audioCtx.resume();
-  const ab = audioCtx.createBuffer(1, before.length+after.length, RATE);
-  const ch = ab.getChannelData(0);
-  for(let i=0;i<before.length;i++) ch[i] = before[i]/32768;
-  for(let i=0;i<after.length;i++) ch[before.length+i] = after[i]/32768;
-  const src = audioCtx.createBufferSource();
-  src.buffer = ab; src.connect(audioCtx.destination); src.start();
-});
-/* イントロ〜ループ終了までを通しで試聴 */
-$("playFull").addEventListener("click", ()=>{
-  if(!LOOP_EDIT) return;
-  playPcmSlice(LOOP_EDIT.pcm, LOOP_EDIT.introStart, LOOP_EDIT.loopEnd);
+$("loopPlayToggle").addEventListener("click", ()=>{
+  if(loopPreviewSource) stopLoopPreview(); else startLoopPreview();
 });
 /* 確定してFULLサンプルに反映 */
 $("applyLoop").addEventListener("click", ()=>{
