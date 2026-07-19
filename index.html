@@ -50,7 +50,7 @@ function getBinarySync(file){return __EMBEDDED_WASM_BYTES}async function getWasm
   html,body{background:var(--body); color:var(--ink);
     font-family:-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;}
   .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;}
-  .wrap{max-width:760px; margin:0 auto; padding:20px 14px 80px;}
+  .wrap{max-width:760px; margin:0 auto; padding:20px 14px 100px;}
 
   /* ── ヘッダ: チップのシルク印刷風 ── */
   header{display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;
@@ -59,7 +59,11 @@ function getBinarySync(file){return __EMBEDDED_WASM_BYTES}async function getWasm
   header h1 .arrow{color:var(--sfc-red);}
   header .chiplabel{font-size:11px; letter-spacing:.22em; color:var(--ink-soft);
     text-transform:uppercase;}
-  .btn-dots{display:inline-flex; gap:5px; margin-left:auto; align-self:center;}
+  #resetBtn{margin-left:auto; align-self:center; border:2px solid var(--ink); background:var(--panel);
+    color:var(--ink); font-size:12px; font-weight:700; letter-spacing:.02em; border-radius:20px;
+    padding:6px 14px; cursor:pointer;}
+  #resetBtn:active{background:var(--panel-deep);}
+  .btn-dots{display:inline-flex; gap:5px; align-self:center;}
   .btn-dots i{width:11px;height:11px;border-radius:50%;display:block;}
   .btn-dots i:nth-child(1){background:var(--sfc-red);}   .btn-dots i:nth-child(2){background:var(--sfc-yellow);}
   .btn-dots i:nth-child(3){background:var(--sfc-green);} .btn-dots i:nth-child(4){background:var(--sfc-blue);}
@@ -143,8 +147,16 @@ function getBinarySync(file){return __EMBEDDED_WASM_BYTES}async function getWasm
   .big{border:0; border-radius:10px; padding:14px 22px; font-size:15px; font-weight:800;
     letter-spacing:.03em; cursor:pointer; color:#fff; box-shadow:0 3px 0 rgba(0,0,0,.25);}
   .big:active{transform:translateY(2px); box-shadow:0 1px 0 rgba(0,0,0,.25);}
-  #dlkoala{background:var(--sfc-red); flex:1; min-width:220px;}
-  #dlwav{background:var(--slot);}
+  #dlkoala{background:var(--sfc-red); width:100%;}
+  #dlwav{background:var(--slot); flex:1; min-width:220px;}
+
+  /* ── .koala ダウンロード: 常に画面下部に固定 ── */
+  #dlfixed{display:none; position:fixed; left:0; right:0; bottom:0; z-index:100;
+    background:var(--body); border-top:3px solid var(--ink);
+    padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+    box-shadow:0 -4px 12px rgba(0,0,0,.2);}
+  #dlfixed.on{display:block;}
+  #dlfixed .big{max-width:732px; margin:0 auto;}
   #note{display:none; margin-top:14px; font-size:11.5px; color:var(--ink-soft); line-height:1.7;}
   #err{display:none; margin-top:14px; background:#f3d7d2; border:2px solid var(--sfc-red);
     border-radius:8px; padding:10px 12px; font-size:13px;}
@@ -156,6 +168,7 @@ function getBinarySync(file){return __EMBEDDED_WASM_BYTES}async function getWasm
   <header>
     <h1>SPC <span class="arrow">→</span> KOALA</h1>
     <span class="chiplabel mono">S-SMP · BRR Sample Extractor</span>
+    <button id="resetBtn" type="button" title="読み込み状態をリセットして最初からやり直す">↺ リセット</button>
     <span class="btn-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
   </header>
 
@@ -220,12 +233,15 @@ function getBinarySync(file){return __EMBEDDED_WASM_BYTES}async function getWasm
   </section>
 
   <div id="dlsec">
-    <button class="big" id="dlkoala">.koala をダウンロード</button>
     <button class="big" id="dlwav">WAV一括 (ZIP)</button>
   </div>
 
   <p id="note">※ 出力の .koala / WAV に含まれる音声データの権利は元コンテンツの権利者に帰属します。利用は私的使用の範囲で。<br>
   ※ ループパッドは looping=true で書き出します。Koala側の挙動が想定と違う場合はループパッド化をオフにしてください。</p>
+</div>
+
+<div id="dlfixed">
+  <button class="big" id="dlkoala">.koala をダウンロード</button>
 </div>
 
 <script>
@@ -1518,6 +1534,53 @@ function setStatus(msg){
   else { $("status").style.display = "none"; $("status").textContent = ""; }
 }
 
+/* ===================== リセット ===================== */
+/* 連続して別SPCを読み込むと、まれにWASMエンジン側の内部状態が引き継がれて
+   読み込みに失敗することがある(ブラウザ再読み込みで直るのはそのため)。
+   ホーム画面追加時など再読み込みしにくい環境向けに、状態を丸ごと初期化する。 */
+function resetAll(){
+  try{ stopLoopPreview(); }catch(e){}
+  if(audioCtx){ try{ audioCtx.close(); }catch(e){} audioCtx = null; }
+
+  // WASMエンジンを次回の読み込み時にまるごと再初期化させる
+  ENGINE_MOD = null;
+
+  // 状態変数を初期値に戻す
+  SPC = null; SAMPLES = []; DUPES = []; JUNK = []; SELECTED = new Set();
+  RATE = 32000; baseName = "spc_project"; BANK = 0; ENVMAP = new Map();
+  LOOP_INFO = null; RAW_BYTES = null; REF_RAW_BYTES = null;
+  LOOP_EDIT = null; LOOP_DRAG = null;
+
+  // ファイル選択欄をクリア(同じファイルを選び直せるように)
+  $("fpick").value = ""; $("frefpick").value = ""; $("refinfo").textContent = "";
+
+  // レート・チェックボックス・数値欄を初期値に戻す
+  document.querySelectorAll("#rateseg button").forEach(b=> b.classList.toggle("on", b.dataset.r === "32000"));
+  $("looppad").checked = true; $("useenv").checked = true; $("capsec").value = 300;
+  syncBankTabs();
+
+  // セクション表示を初期状態(未読み込み)に戻す
+  $("opts").classList.remove("on");
+  $("padsec").style.display = "none";
+  $("listsec").style.display = "none";
+  $("dlsec").classList.remove("on");
+  $("dlfixed").classList.remove("on");
+  $("note").style.display = "none";
+  $("err").style.display = "none"; $("err").textContent = "";
+  $("fileinfo").style.display = "none"; $("fileinfo").innerHTML = "";
+  setStatus(null);
+
+  // 描画済みの内容をクリア
+  $("padgrid").innerHTML = ""; $("slist").innerHTML = ""; $("cap").innerHTML = "";
+  $("loopreadout").innerHTML = "";
+  const cv = $("loopcanvas");
+  if(cv){ const c2d = cv.getContext("2d"); if(c2d) c2d.clearRect(0,0,cv.width,cv.height); }
+}
+$("resetBtn").addEventListener("click", ()=>{
+  if(SPC && !confirm("読み込んだデータを破棄してリセットします。よろしいですか?")) return;
+  resetAll();
+});
+
 $("drop").addEventListener("click", ()=> $("fpick").click());
 $("fpick").addEventListener("change", e=>{ if(e.target.files[0]) loadFile(e.target.files[0]); });
 $("frefpick").addEventListener("change", async e=>{
@@ -1577,6 +1640,7 @@ async function loadFile(file){
     BANK = 0; syncBankTabs();
     $("opts").classList.add("on"); $("padsec").style.display = "block";
     $("listsec").style.display = "block"; $("dlsec").classList.add("on");
+    $("dlfixed").classList.add("on");
     $("note").style.display = "block";
     LOOP_INFO = null;
     renderInfo(); renderList(); renderPads();
