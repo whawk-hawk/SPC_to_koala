@@ -1230,16 +1230,32 @@ function step5_refineEndpointCore(mainMono, refMono, rate, mainResult, refResult
       if (crossPeak > bestCrossForM) bestCrossForM = crossPeak;
     }
 
-    // 1xを基準に、より大きい倍率が「明確に(閾値以上)」スコアを改善する場合だけ採用する貪欲法
+    // 1xを基準に、より大きい倍率が「明確に」スコアを改善する場合だけ採用する貪欲法。
+    // 判定基準は次のどちらかを満たせば「明確な改善」とみなす:
+    //   (a) 絶対差が0.05以上ある(従来通り)
+    //   (b) スコアが「ほぼ完全一致」(0.999以上)まで改善している
+    //       (例: 1x=0.9872→2x=1.0000。絶対差0.0128は0.05に届かないが、2xはほぼ
+    //        完全一致なので真の周期とみなして採用する)
+    // ただし(b)は、クロス相関だけ見かけ上ほぼ完全でも自己相関がベストより明確に
+    // 悪化しているなら「見せかけの改善」(探索範囲が広がったことによる偶然の一致)
+    // とみなして却下する(selfConsistent)。
     const MEANINGFUL_IMPROVEMENT = 0.05;
+    const NEAR_PERFECT = 0.999;
+    const NOISE_EPS = 1e-4;
+    const SELF_CORR_TOLERANCE = 0.01;
     const useCross = haveRef && bestCrossForM > 0.5;
     const scores = useCross ? crossScores : selfScores;
     bestM = 1;
     let bestScoreSoFar = scores[1];
+    let bestSelfSoFar = selfScores[1];
     for (let m = 2; m <= maxM; m++) {
-      if (scores[m] > bestScoreSoFar + MEANINGFUL_IMPROVEMENT) {
+      const clearImprovement = scores[m] > bestScoreSoFar + MEANINGFUL_IMPROVEMENT;
+      const reachesNearPerfect = scores[m] >= NEAR_PERFECT && scores[m] > bestScoreSoFar + NOISE_EPS;
+      const selfConsistent = selfScores[m] >= bestSelfSoFar - SELF_CORR_TOLERANCE;
+      if ((clearImprovement || reachesNearPerfect) && selfConsistent) {
         bestM = m;
         bestScoreSoFar = scores[m];
+        bestSelfSoFar = selfScores[m];
       }
     }
   }
@@ -1437,8 +1453,18 @@ function analyzeAndExtractLoop(M, mainU8, refU8, rate = 32000, maxSeconds = 600)
     ? step4_detectLoop(M, refU8, rate, maxSeconds, unionPtrSlots, wrapThreshold)
     : { success: false, ptrSlots: [], s0: 0, loopLen: 0 };
 
-  // ---- STEP4.4: 約数方向のループ長候補を検証 ----
-  mainResult.loopLen = step4_4_divisorCheck(M, mainU8, rate, mainResult.s0, mainResult.loopLen);
+  // ---- STEP4.4: 約数方向のループ長候補を検証(縮小できなくなるまで繰り返す) ----
+  //   検出値が真の周期の合成数倍(例: 25倍 = 5倍×5倍)になっているケースがあるため、
+  //   1回縮小して終わりにせず、それ以上縮小できなくなるまで同じチェックを繰り返す。
+  {
+    const MAX_DIVISOR_PASSES = 5; // 保険的な上限(6の5乗=7776倍まで対応できれば十分)
+    for (let pass = 0; pass < MAX_DIVISOR_PASSES; pass++) {
+      const before = mainResult.loopLen;
+      const after = step4_4_divisorCheck(M, mainU8, rate, mainResult.s0, before);
+      if (after === before) break; // これ以上縮小できないので終了
+      mainResult.loopLen = after;
+    }
+  }
 
   // ---- STEP4.5 + STEP5: 整数倍チェック + 終端の波形相関再探索 ----
   const refine = step5_refineEndpoint(M, mainU8, refU8, rate, mainResult, refResult);
