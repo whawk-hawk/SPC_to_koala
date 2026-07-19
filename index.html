@@ -1438,6 +1438,93 @@ function analyzeAndExtractLoop(M, mainU8, refU8, rate = 32000, maxSeconds = 600)
 
 /* ===================== ここまでSTEP1〜6パイプライン ===================== */
 
+/* ===================== フル音源BPM推定 =====================
+   FULLサンプル(STEP6で抽出済みのループ1周ぶんのモノラルPCM)から、
+   自己相関を使ってテンポ(BPM)を推定する。SPC音源にはBPMのメタ情報が
+   存在しないため、以下の2段階のハイブリッド方式で推定する。
+
+   1) 波形のオンセット包絡線(10msフレームごとの音量の立ち上がり成分)に対し、
+      既存のループ検出と同じ自己相関手法で拍周期を推定し、生のBPM候補を得る。
+   2) 検出済みのループ長(秒)が、そのBPM候補の「1小節(4拍)の整数倍」に
+      近いかどうかをチェックする。オクターブ誤り(実際の倍/半分/1.5倍等を
+      誤検出するテンポ推定にありがちな問題)対策として、BPM候補を
+      ×0.5/×2/×1.5等にずらした値も合わせて照合し、最もループ長と整合する
+      ものを採用する。
+   3) どの候補も一定の精度でループ長と整合しなければ検出失敗とみなし、
+      nullを返す(=呼び出し側は何もフォールバックせず、既存の固定値のまま扱う)。
+
+   戻り値: 成功時 {bpm, bars, confidence} / 失敗時 null
+*/
+function estimateBPM(mono, rate, loopSec){
+  if(!mono || !loopSec || loopSec <= 0) return null;
+  const HOP = Math.round(rate * 0.010); // 10ms窓
+  const nFrames = Math.floor(mono.length / HOP);
+  if(nFrames < 64) return null; // 短すぎて信頼できない
+
+  // オンセット包絡線: フレームごとの平均振幅→立ち上がり成分(半波整流)のみ残す
+  const env = new Float64Array(nFrames);
+  for(let i=0;i<nFrames;i++){
+    let sum = 0;
+    const base = i*HOP;
+    for(let j=0;j<HOP;j++) sum += Math.abs(mono[base+j]);
+    env[i] = sum / HOP;
+  }
+  const onset = new Float64Array(nFrames);
+  for(let i=1;i<nFrames;i++){
+    const d = env[i] - env[i-1];
+    onset[i] = d > 0 ? d : 0;
+  }
+  let mean = 0;
+  for(let i=0;i<nFrames;i++) mean += onset[i];
+  mean /= nFrames;
+  const centered = new Float64Array(nFrames);
+  for(let i=0;i<nFrames;i++) centered[i] = onset[i] - mean;
+
+  // 60〜200BPMに相当するラグ範囲で自己相関のピークを探す
+  const framesPerSec = 1000 / 10; // HOP=10ms換算
+  const minBPM = 60, maxBPM = 200;
+  const lagMin = Math.max(1, Math.round(framesPerSec * 60 / maxBPM));
+  const lagMax = Math.min(nFrames - 1, Math.round(framesPerSec * 60 / minBPM));
+  if(lagMax <= lagMin) return null;
+
+  let bestLag = -1, bestScore = -Infinity;
+  for(let lag=lagMin; lag<=lagMax; lag++){
+    let s = 0;
+    for(let i=lag;i<nFrames;i++) s += centered[i]*centered[i-lag];
+    if(s > bestScore){ bestScore = s; bestLag = lag; }
+  }
+  if(bestLag <= 0) return null;
+  const rawBPM = 60 / (bestLag / framesPerSec);
+
+  // ループ長との整数小節チェック(オクターブ候補込み)
+  const octaveMultipliers = [1, 0.5, 2, 1.5, 2/3, 0.75, 4/3];
+  const barCandidates = [1,2,4,8,16,32,64];
+  const TOLERANCE = 0.03; // 3%以内なら整数小節とみなす
+
+  let best = null;
+  for(const mult of octaveMultipliers){
+    const bpm = rawBPM * mult;
+    if(bpm < 40 || bpm > 300) continue;
+    const barSec = 4 * 60 / bpm; // 4/4拍子1小節の秒数
+    for(const bars of barCandidates){
+      const total = barSec * bars;
+      const ratio = loopSec / total;
+      const nearestInt = Math.round(ratio);
+      if(nearestInt < 1) continue;
+      const err = Math.abs(ratio - nearestInt) / nearestInt;
+      if(err <= TOLERANCE && (!best || err < best.err)){
+        best = {bpm, bars: nearestInt, err};
+      }
+    }
+  }
+  if(!best) return null;
+  return {
+    bpm: Math.round(best.bpm * 100) / 100,
+    bars: best.bars,
+    confidence: best.err < 0.01 ? "高" : "中"
+  };
+}
+
 /* ===================== WAV エンコード ===================== */
 function encodeWAV(pcm, rate){
   const buf = new ArrayBuffer(44 + pcm.length*2);
@@ -1493,7 +1580,10 @@ function buildSongJSON(name){
 }
 function buildSequenceJSON(){
   const seqs = Array.from({length:32},()=>({pattern:{notes:null,numBars:1}}));
-  return {autoPlay:"off",beatsPerBar:4,bpm:120.0,currSequenceId:0,
+  // フル音源からBPMを推定できた場合のみ上書きする。推定できなかった場合(フォールバック)は
+  // 何もせず既定値の120.0のまま出力する。
+  const bpmValue = (DETECTED_BPM && DETECTED_BPM.bpm) ? DETECTED_BPM.bpm : 120.0;
+  return {autoPlay:"off",beatsPerBar:4,bpm:bpmValue,currSequenceId:0,
     quantizeDivision:16,seqSnap:3,sequences:seqs,swing:0.0};
 }
 
@@ -1511,6 +1601,7 @@ let BANK = 0;            // 表示中バンク 0..3
 let ENVMAP = new Map();  // SRCN → DSP実測エンベロープ
 let audioCtx = null;
 let LOOP_INFO = null;    // {sec, score} 検出されたループ長(表示用の代表値)
+let DETECTED_BPM = null; // {bpm, bars, confidence} フル音源から推定したBPM(未検出/未確定時はnull)
 let RAW_BYTES = null;    // 元SPCファイルのバイト列(エンジン再ロード用)
 let REF_RAW_BYTES = null; // リファレンスSPCファイルのバイト列(任意・継ぎ目精度向上用)
 let LOOP_EDIT = null;    // {capSec, pcm, candidates, introStart, loopStart, loopEnd} ループ編集状態
@@ -1643,6 +1734,7 @@ async function loadFile(file){
     $("dlfixed").classList.add("on");
     $("note").style.display = "block";
     LOOP_INFO = null;
+    DETECTED_BPM = null;
     renderInfo(); renderList(); renderPads();
 
     // ここから: DSPソロ再生で「本物の再生音」を各pad用サンプルに反映する処理
@@ -1670,6 +1762,7 @@ async function runDspCapture(){
       loopEndSec = loopResult.bestE / RATE;
       loopPcm = loopResult.loopSamples;
       LOOP_INFO = {sec: loopEndSec - loopStartSec, score: loopResult.bestSelfCorr};
+      DETECTED_BPM = estimateBPM(loopPcm, RATE, LOOP_INFO.sec); // 失敗時はnull(フォールバック不要のため何もしない)
       const crossNote = loopResult.trustCross ? `(クロス相関${loopResult.bestCrossCorr.toFixed(3)}で確定)` : "";
       setStatus(`ループ検出成功: ${loopStartSec.toFixed(3)}秒〜${loopEndSec.toFixed(3)}秒 ` +
                 `(長さ${LOOP_INFO.sec.toFixed(3)}秒, 自己相関${loopResult.bestSelfCorr.toFixed(3)})${crossNote}`);
@@ -1679,6 +1772,7 @@ async function runDspCapture(){
       loopEndSec = 120;
       loopPcm = loopResult.loopSamples;
       LOOP_INFO = {sec: 120, score: 0};
+      DETECTED_BPM = null; // ループ長自体が信頼できないため、BPM推定は行わない
       $("err").textContent = "ループ地点を自動検出できなかったため、120秒固定レンダリングにフォールバックしました。";
       $("err").style.display = "block";
     }
@@ -1759,11 +1853,14 @@ function renderInfo(){
         ? `<div class="row"><span class="k">LOOP</span><span>イントロ ${LOOP_INFO.introSec.toFixed(3)}秒 + ループ ${LOOP_INFO.sec.toFixed(3)}秒(下のループ編集で手動確定済み)</span></div>`
         : `<div class="row"><span class="k">LOOP</span><span>${LOOP_INFO.sec.toFixed(3)}秒(自己相関スコア ${LOOP_INFO.score.toFixed(3)}・未確定 — 下のループ編集で確認してください)</span></div>`)
     : "";
+  const bpmRow = DETECTED_BPM
+    ? `<div class="row"><span class="k">BPM</span><span>推定 ${DETECTED_BPM.bpm.toFixed(2)}(信頼度${DETECTED_BPM.confidence}・${DETECTED_BPM.bars}小節相当)</span></div>`
+    : `<div class="row"><span class="k">BPM</span><span>推定できませんでした(sequence.jsonは既定の120.0のまま出力されます)</span></div>`;
   $("fileinfo").innerHTML =
     `<div class="row"><span class="k">FILE</span><span>${baseName}.spc</span></div>` + tag +
     `<div class="row"><span class="k">DIR</span><span>0x${SPC.dir.toString(16).toUpperCase().padStart(4,"0")}</span></div>` +
     `<div class="row"><span class="k">SAMPLES</span><span>ユニーク ${SAMPLES.filter(s=>s.idx!=="FULL").length} 個 / 重複 ${DUPES.length} 件・極短(${JUNK_FRAME_THRESHOLD}f未満)${JUNK.length}件を除外</span></div>` +
-    loopRow;
+    loopRow + bpmRow;
   $("fileinfo").style.display = "block";
 }
 
