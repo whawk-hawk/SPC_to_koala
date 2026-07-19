@@ -1569,6 +1569,33 @@ function encodeWAV(pcm, rate){
   return buf;
 }
 
+/* ===================== .koala 書き出し専用: 48kHzリサンプル =====================
+   Koala Samplerは読み込んだWAVのヘッダのサンプルレートを「表示」には使うが、
+   実際の長さ・再生速度の計算は常に自身の内部基準レート(48000Hz)で行っている
+   (ヘッダが32000Hzでも、サンプル数を48000Hzとして扱ってしまう)。
+   そのため解析時のレート(16000/32000Hz)のまま書き出すと、Koala実機では
+   1.5倍速(32000Hz時)や3倍速(16000Hz時)で再生されてしまう。
+   .koala書き出し時だけ、ここで48000Hzに変換してから埋め込む。
+   (解析ロジック自体は従来通り16000/32000Hzのまま行うため、ここは書き出し直前の変換のみ)
+*/
+const KOALA_EXPORT_RATE = 48000;
+function resampleForExport(pcm, fromRate, toRate){
+  if(fromRate === toRate) return pcm;
+  const ratio = fromRate / toRate;
+  const outLen = Math.max(1, Math.round(pcm.length / ratio));
+  const out = new Int16Array(outLen);
+  const last = pcm.length ? pcm[pcm.length-1] : 0;
+  for(let i=0;i<outLen;i++){
+    const srcPos = i*ratio;
+    const i0 = Math.floor(srcPos);
+    const frac = srcPos - i0;
+    const s0 = i0 < pcm.length ? pcm[i0] : last;
+    const s1 = (i0+1) < pcm.length ? pcm[i0+1] : s0;
+    out[i] = Math.max(-32768, Math.min(32767, Math.round(s0 + (s1-s0)*frac)));
+  }
+  return out;
+}
+
 /* ===================== .koala テンプレート ===================== */
 const PAD_TPL = {attack:0.00011,bus:-1,channel:0,chokeGroup:0,cyclicPeriod:20,end:0,
   eq:{enabled:"false",hi:{freq:8000.0,gain:0.0,q:1.0,type:"highshelf"},
@@ -1590,7 +1617,10 @@ function buildSamplerJSON(sel, rate){
     p.pad = String(padNo);
     p.label = padLabel(s);
     p.sampleId = 500 + padNo;
-    p.end = p.zoomEnd = s.frames;
+    // Koala実機は常に48000Hz基準でサンプル数を扱うため、end/zoomEndは
+    // 解析時のframes(16000/32000Hz基準)ではなく、48000Hzリサンプル後の
+    // フレーム数に合わせる(実際に書き出すWAVも48kHzにリサンプルする)。
+    p.end = p.zoomEnd = Math.round(s.frames * KOALA_EXPORT_RATE / RATE);
     p.looping = asLoop ? "true" : "false";
     p.oneshot = asLoop ? "false" : "true";
     if(useEnv && s.env){
@@ -2217,7 +2247,8 @@ $("dlkoala").addEventListener("click", async ()=>{
   const sel = SAMPLES.filter(s=>SELECTED.has(s.idx));
   const zip = new JSZip();
   const sampler = zip.folder("sampler");
-  sel.forEach((s, padNo)=> sampler.file(`${500+padNo}.wav`, encodeWAV(s.pcm, RATE)));
+  sel.forEach((s, padNo)=> sampler.file(`${500+padNo}.wav`,
+    encodeWAV(resampleForExport(s.pcm, RATE, KOALA_EXPORT_RATE), KOALA_EXPORT_RATE)));
   sampler.file("sampler.json", JSON.stringify(buildSamplerJSON(sel, RATE), null, 1));
   zip.file("mixer.json",    JSON.stringify(MIXER_TPL, null, 1));
   zip.file("fx.json",       JSON.stringify(FX_TPL, null, 1));
