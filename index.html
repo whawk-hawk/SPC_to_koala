@@ -872,7 +872,9 @@ function findPtrSlots(M, u8, rate) {
 // maxSeconds: 監視する最大秒数, ptrSlots: STEP3/3.5で見つかったゼロページアドレスの配列,
 // wrapThreshold: これ以上の減少を「巻き戻り」とみなす閾値(デフォルト0 = 少しでも減れば巻き戻り扱い)
 // 戻り値: { success, s0, loopLen, ptrSlots, usedStrict } (success=falseの場合は検出失敗)
-function step4_detectLoop(M, u8, rate, maxSeconds, ptrSlots, wrapThreshold = 0) {
+function step4_detectLoop(M, u8, rate, maxSeconds, ptrSlotsRaw, wrapThreshold = 0) {
+  // [B] 多数決/strict判定を行う前に、周期の異なるアドレスを除外しておく
+  const ptrSlots = step4_filterPtrSlotsByPeriod(M, u8, rate, Math.min(maxSeconds, 200), ptrSlotsRaw);
   const result = { success: false, ptrSlots, s0: 0, loopLen: 0, usedStrict: false };
   if (ptrSlots.length === 0) return result;
 
@@ -980,6 +982,76 @@ function step4_detectLoop(M, u8, rate, maxSeconds, ptrSlots, wrapThreshold = 0) 
   result.gaps = gaps;
   result.bestPeriod = bestPeriod;
   return result;
+}
+
+/* ===================== STEP4準備: 周期フィルタ(B) =====================
+   spc_loop_analyzer_updated.cpp の filter_ptrSlots_by_period() 相当。
+   ゼロページ候補の中には、曲全体の周期とは違う周期で巻き戻るチャンネル
+   (例:曲の半分/3分の1などの周期を持つ伴奏パターン)が混ざっていることがある。
+   多数決/strict判定を行う前に、各アドレスを個別に観測して周期を求め、
+   最も多くのアドレスが共有している周期のグループだけに絞り込む。
+*/
+function step4_filterPtrSlotsByPeriod(M, u8, rate, maxSeconds, ptrSlots) {
+  if (ptrSlots.length <= 1) return ptrSlots; // 絞り込みようがない
+
+  const ptr = M._malloc(u8.length);
+  M.HEAPU8.set(u8, ptr);
+  const rc = M.ccall('spc_load', 'number', ['number', 'number', 'number'], [ptr, u8.length, rate]);
+  M._free(ptr);
+  if (rc !== 0) return ptrSlots; // ロード失敗時はフィルタせずそのまま返す
+  M.ccall('spc_log_set_enabled', 'null', ['number'], [0]);
+
+  const ramPtr = M.ccall('spc_ram_ptr', 'number', [], []);
+  let ram = refreshRamView(M, ramPtr, null);
+
+  const n = ptrSlots.length;
+  let prevVal = ptrSlots.map(a => ram[a] | (ram[a + 1] << 8));
+  const wrapTimes = ptrSlots.map(() => []);
+
+  const FRAMES_PER_CHUNK = 2048;
+  const outPtr = M._malloc(FRAMES_PER_CHUNK * 2 * 2);
+  const total = Math.round(Math.min(maxSeconds, 200) * rate);
+  let produced = 0;
+
+  while (produced < total) {
+    M.ccall('spc_play', 'number', ['number', 'number'], [outPtr, FRAMES_PER_CHUNK]);
+    produced += FRAMES_PER_CHUNK;
+    ram = refreshRamView(M, ramPtr, ram);
+    for (let i = 0; i < n; i++) {
+      const a = ptrSlots[i];
+      const v = ram[a] | (ram[a + 1] << 8);
+      if (prevVal[i] - v > 0) wrapTimes[i].push(produced);
+      prevVal[i] = v;
+    }
+  }
+  M._free(outPtr);
+
+  // 各アドレスの代表的な巻き戻り間隔(中央値)を求める
+  const PERIOD_TOLERANCE = Math.round(0.15 * rate); // ±0.15秒
+  const period = ptrSlots.map((_, i) => {
+    if (wrapTimes[i].length < 2) return -1;
+    const gaps = [];
+    for (let k = 1; k < wrapTimes[i].length; k++) gaps.push(wrapTimes[i][k] - wrapTimes[i][k - 1]);
+    gaps.sort((a, b) => a - b);
+    return gaps[Math.floor(gaps.length / 2)];
+  });
+
+  // 周期が近い(±0.15秒)アドレス同士をグループ化し、最大グループを採用
+  let bestGroup = [];
+  for (let i = 0; i < n; i++) {
+    if (period[i] < 0) continue;
+    const group = [];
+    for (let j = 0; j < n; j++) {
+      if (period[j] < 0) continue;
+      if (Math.abs(period[i] - period[j]) <= PERIOD_TOLERANCE) group.push(j);
+    }
+    if (group.length > bestGroup.length) bestGroup = group;
+  }
+
+  if (bestGroup.length === 0) return ptrSlots; // 安定した周期が見つからなければフィルタしない
+
+  const filtered = bestGroup.map(idx => ptrSlots[idx]).sort((a, b) => a - b);
+  return filtered;
 }
 
 /* ===================== STEP5の基礎: 正規化相関計算 =====================
