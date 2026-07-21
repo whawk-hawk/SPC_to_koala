@@ -1478,6 +1478,7 @@ function analyzeAndExtractLoop(M, mainU8, refU8, rate = 32000, maxSeconds = 600)
     rate,
     s0: refine.s0,
     bestE: refine.bestE,
+    mainMono: refine.mainMono, // イントロ抽出用: ループ切り出し前の全体波形
     bestK: refine.bestK,
     bestM: refine.bestM,
     refinedLen: refine.refinedLen,
@@ -1692,16 +1693,19 @@ let DETECTED_BPM = null; // {bpm, bars, confidence} フル音源から推定し�
 let RAW_BYTES = null;    // 元SPCファイルのバイト列(エンジン再ロード用)
 let REF_RAW_BYTES = null; // リファレンスSPCファイルのバイト列(任意・継ぎ目精度向上用)
 let LOOP_EDIT = null;    // {capSec, pcm, candidates, introStart, loopStart, loopEnd} ループ編集状態
+let INTRO_PCM = null;    // イントロ音声(mainMono[0:s0])。イントロが検出できなかった場合はnull
 let LOOP_DRAG = null;    // ドラッグ中のハンドル: "start" | "end" | null
 const VOICE_COLORS = ["#e6402a","#f0a800","#159a54","#1c6bb8","#8e44ad","#16a085","#d35400","#7f8c8d"];
 
 function padLabel(s){
   if(s.idx === "FULL") return `${baseName}_FULL`;
+  if(s.idx === "INTRO") return `${baseName}_INTRO`;
   const tag = s.dspCaptured ? "note" : (s.loopFlag?"loop":"shot");
   return `S${String(s.idx).padStart(2,"0")}_${tag}`;
 }
 function sampleFileName(s){
   if(s.idx === "FULL") return `spc_fullmix.wav`;
+  if(s.idx === "INTRO") return `spc_intro.wav`;
   return `spc_sample_${String(s.idx).padStart(2,"0")}${s.dspCaptured?"_note":""}.wav`;
 }
 
@@ -1727,7 +1731,7 @@ function resetAll(){
   SPC = null; SAMPLES = []; DUPES = []; JUNK = []; SELECTED = new Set();
   RATE = 32000; baseName = "spc_project"; BANK = 0; ENVMAP = new Map();
   LOOP_INFO = null; RAW_BYTES = null; REF_RAW_BYTES = null;
-  LOOP_EDIT = null; LOOP_DRAG = null;
+  LOOP_EDIT = null; LOOP_DRAG = null; INTRO_PCM = null;
 
   // ファイル選択欄をクリア(同じファイルを選び直せるように)
   $("fpick").value = ""; $("frefpick").value = ""; $("refinfo").textContent = "";
@@ -1853,6 +1857,11 @@ async function runDspCapture(){
       const crossNote = loopResult.trustCross ? `(クロス相関${loopResult.bestCrossCorr.toFixed(3)}で確定)` : "";
       setStatus(`ループ検出成功: ${loopStartSec.toFixed(3)}秒〜${loopEndSec.toFixed(3)}秒 ` +
                 `(長さ${LOOP_INFO.sec.toFixed(3)}秒, 自己相関${loopResult.bestSelfCorr.toFixed(3)})${crossNote}`);
+      // イントロ抽出: s0(ループ開始点)より前の区間が存在する場合のみ、
+      // イントロ音声として保持する(無ければnullのまま=イントロ書き出しはスキップされる)
+      INTRO_PCM = (loopResult.s0 > 0 && loopResult.mainMono)
+        ? loopResult.mainMono.slice(0, loopResult.s0)
+        : null;
     } else {
       // STEP1〜6が全滅した場合は、spc_loop_analyzer本来の仕様通り120秒固定レンダリングにフォールバック
       loopStartSec = 0;
@@ -1860,6 +1869,7 @@ async function runDspCapture(){
       loopPcm = loopResult.loopSamples;
       LOOP_INFO = {sec: 120, score: 0};
       DETECTED_BPM = null; // ループ長自体が信頼できないため、BPM推定は行わない
+      INTRO_PCM = null; // フォールバック時はs0が定義できないためイントロ書き出し対象外
       $("err").textContent = "ループ地点を自動検出できなかったため、120秒固定レンダリングにフォールバックしました。";
       $("err").style.display = "block";
     }
@@ -2268,6 +2278,23 @@ function download(blob, name){
   setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
 }
 
+/* イントロ専用の.koalaパッケージを作る(FULLサンプル1個だけの最小構成のkoalaプロジェクト) */
+async function buildIntroKoalaBlob(){
+  const introSample = {
+    idx: "INTRO", loopFlag: false, forceOneshot: true, isFullMix: true,
+    frames: INTRO_PCM.length, pcm: INTRO_PCM, bytes: 0, env: typicalEnv(false)
+  };
+  const zip = new JSZip();
+  const sampler = zip.folder("sampler");
+  sampler.file(`500.wav`, encodeWAV(resampleForExport(introSample.pcm, RATE, KOALA_EXPORT_RATE), KOALA_EXPORT_RATE));
+  sampler.file("sampler.json", JSON.stringify(buildSamplerJSON([introSample], RATE), null, 1));
+  zip.file("mixer.json",    JSON.stringify(MIXER_TPL, null, 1));
+  zip.file("fx.json",       JSON.stringify(FX_TPL, null, 1));
+  zip.file("song.json",     JSON.stringify(buildSongJSON(baseName + "_intro"), null, 1));
+  zip.file("sequence.json", JSON.stringify(buildSequenceJSON(), null, 1));
+  return await zip.generateAsync({type:"blob", compression:"STORE"});
+}
+
 $("dlkoala").addEventListener("click", async ()=>{
   if(!SELECTED.size) return;
   const sel = SAMPLES.filter(s=>SELECTED.has(s.idx));
@@ -2282,6 +2309,17 @@ $("dlkoala").addEventListener("click", async ()=>{
   zip.file("sequence.json", JSON.stringify(buildSequenceJSON(), null, 1));
   const blob = await zip.generateAsync({type:"blob", compression:"STORE"});
   download(blob, baseName + ".koala");
+
+  // イントロが検出できている場合のみ、続けて別ファイルとしてイントロ用.koalaも書き出す
+  // (イントロが無い/検出できなかった場合は何もせず、ループのみの書き出しで終わる)
+  if(INTRO_PCM && INTRO_PCM.length > 0){
+    const introBlob = await buildIntroKoalaBlob();
+    download(introBlob, baseName + "_intro.koala");
+    setStatus(`${baseName}.koala と ${baseName}_intro.koala の2ファイルを書き出しました`);
+  } else {
+    setStatus(`${baseName}.koala を書き出しました(イントロは検出されなかったため未書き出し)`);
+  }
+  setTimeout(()=>setStatus(null), 3000);
 });
 
 $("dlwav").addEventListener("click", async ()=>{
