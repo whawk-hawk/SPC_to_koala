@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>SPC → KOALA | S-SMP Sample Extractor</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
@@ -153,7 +153,11 @@ function getBinarySync(file){return __EMBEDDED_WASM_BYTES}async function getWasm
   #dlfixed{display:none; position:fixed; left:0; right:0; bottom:0; z-index:100;
     background:var(--body); border-top:3px solid var(--ink);
     padding:10px 14px calc(10px + env(safe-area-inset-bottom));
-    box-shadow:0 -4px 12px rgba(0,0,0,.2);}
+    box-shadow:0 -4px 12px rgba(0,0,0,.2);
+    /* iOS Safariで慣性スクロール中にfixed要素が一瞬消える/ズレる問題への対策:
+       GPU合成レイヤーを強制して常に描画され続けるようにする */
+    transform:translateZ(0); -webkit-transform:translateZ(0);
+    will-change:transform; -webkit-backface-visibility:hidden; backface-visibility:hidden;}
   #dlfixed.on{display:block;}
   #dlfixed .big{max-width:732px; margin:0 auto;}
   #note{display:none; margin-top:14px; font-size:11.5px; color:var(--ink-soft); line-height:1.7;}
@@ -212,6 +216,7 @@ function getBinarySync(file){return __EMBEDDED_WASM_BYTES}async function getWasm
     <div id="loopreadout" class="mono"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
       <button class="ebtn" id="loopPlayToggle">▶ スタート</button>
+      <button class="ebtn" id="dlFullOnly">⬇ フル音源だけダウンロード</button>
     </div>
     <button class="big" id="applyLoop" style="margin-top:12px;background:var(--sfc-green);width:100%;">この位置で確定してFULLサンプルに反映</button>
   </section>
@@ -2343,7 +2348,36 @@ function playSample(s, padEl){
 }
 
 /* ===================== 書き出し ===================== */
-function download(blob, name){
+/* ホーム画面に追加して開いた「スタンドアロン表示」かどうかを判定。
+   この状態のiOS SafariではSafari本体のダウンロード機能が使えないため、
+   通常の<a download>クリックでは保存できない(何も起きない)ことがある。 */
+function isStandaloneMode(){
+  return (window.navigator.standalone === true) ||
+    (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+}
+
+async function download(blob, name){
+  if(isStandaloneMode()){
+    // スタンドアロン表示時: Web Share APIでファイル共有シートを呼び出し、
+    // そこから「"ファイル"に保存」等を選んでもらう
+    try{
+      const file = new File([blob], name, {type: blob.type || "application/octet-stream"});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        await navigator.share({files:[file]});
+        return;
+      }
+    }catch(err){
+      if(err && err.name === "AbortError") return; // ユーザーが共有をキャンセルした場合は何もしない
+      // それ以外のエラー時は下のフォールバックへ
+    }
+    // Web Share APIが使えない/失敗した場合のフォールバック: 新しいタブで開く
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank");
+    setTimeout(()=>URL.revokeObjectURL(url), 60000);
+    setStatus(`「${name}」を新しいタブで開きました。保存できない場合は画面を長押しして「"ファイル"に保存」を選んでください`);
+    setTimeout(()=>setStatus(null), 6000);
+    return;
+  }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click();
@@ -2380,13 +2414,13 @@ $("dlkoala").addEventListener("click", async ()=>{
   zip.file("song.json",     JSON.stringify(buildSongJSON(baseName), null, 1));
   zip.file("sequence.json", JSON.stringify(buildSequenceJSON(), null, 1));
   const blob = await zip.generateAsync({type:"blob", compression:"STORE"});
-  download(blob, baseName + ".koala");
+  await download(blob, baseName + ".koala");
 
   // イントロが検出できている場合のみ、続けて別ファイルとしてイントロ用.koalaも書き出す
   // (イントロが無い/検出できなかった場合は何もせず、ループのみの書き出しで終わる)
   if(INTRO_PCM && INTRO_PCM.length > 0){
     const introBlob = await buildIntroKoalaBlob();
-    download(introBlob, baseName + "_intro.koala");
+    await download(introBlob, baseName + "_intro.koala");
     setStatus(`${baseName}.koala と ${baseName}_intro.koala の2ファイルを書き出しました`);
   } else {
     setStatus(`${baseName}.koala を書き出しました(イントロは検出されなかったため未書き出し)`);
@@ -2402,7 +2436,14 @@ $("dlwav").addEventListener("click", async ()=>{
     zip.file(`sample_${name}_${tag}.wav`, encodeWAV(s.pcm, RATE));
   }
   const blob = await zip.generateAsync({type:"blob", compression:"STORE"});
-  download(blob, baseName + "_samples.zip");
+  await download(blob, baseName + "_samples.zip");
+});
+
+$("dlFullOnly").addEventListener("click", async ()=>{
+  const full = SAMPLES.find(s=>s.idx==="FULL");
+  if(!full){ setStatus("フル音源(FULLサンプル)がまだありません"); setTimeout(()=>setStatus(null), 2000); return; }
+  const blob = new Blob([encodeWAV(full.pcm, RATE)], {type:"audio/wav"});
+  await download(blob, baseName + "_fullmix.wav");
 });
 
 </script>
