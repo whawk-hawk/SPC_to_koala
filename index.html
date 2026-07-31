@@ -291,18 +291,17 @@ const DR_TIME = [1.2,0.74,0.44,0.29,0.18,0.11,0.074,0.037];
 /* S-DSP サスティンレート(SR 0..31)→ 減衰時間の秒数(0は減衰なし=∞) */
 const SR_TIME = [Infinity,38,28,24,19,14,12,9.4,7.1,5.9,4.7,3.5,2.9,2.4,1.8,1.5,
                  1.2,0.88,0.74,0.59,0.44,0.37,0.29,0.22,0.18,0.15,0.11,0.092,0.074,0.055,0.037,0.018];
-/* Koalaノブ(0..1)への変換上限。実測に合わせて調整可能 */
-const KOALA_ATT_MAX = 4.1;   // attackノブ最大 ≒ この秒数とみなす
-const KOALA_REL_MAX = 4.0;   // releaseノブ最大 ≒ この秒数とみなす
-const KOALA_ATT_MIN = 0.00011; // Koalaのattack最小デフォルト値
+/* Koalaのattack/releaseは「秒」で保存される(実機検証済み: ノブ最大=3.0秒) */
+const KOALA_ENV_MAX = 3.0;     // attack/releaseノブの最大値(秒)— 実測確定値
+const KOALA_ATT_MIN = 0.00011; // Koalaのattack最小デフォルト値(秒)
 
 function toKoalaAttack(sec){
-  if(!(sec > 0.006)) return KOALA_ATT_MIN;
-  return Math.min(1, Math.sqrt(sec / KOALA_ATT_MAX));
+  if(!(sec > 0.006)) return KOALA_ATT_MIN;   // ほぼ即時はKoalaの最小値
+  return Math.min(sec, KOALA_ENV_MAX);        // 秒をそのまま書く(3.0でクランプ)
 }
 function toKoalaRelease(sec){
   if(!isFinite(sec) || sec <= 0) return 0;   // SR=0(減衰なし)はキーオフで即カット扱い
-  return Math.min(1, Math.sqrt(Math.min(sec, KOALA_REL_MAX) / KOALA_REL_MAX));
+  return Math.min(sec, KOALA_ENV_MAX);        // 秒をそのまま書く(3.0でクランプ)
 }
 /* SRCN→エンベロープのマップを作る(ADSR有効なボイスを優先) */
 function buildEnvMap(voices){
@@ -331,11 +330,11 @@ function buildEnvMap(voices){
   }
   return map;
 }
-/* DSPに情報がないサンプルへの典型値 */
+/* DSPに情報がないサンプルへの典型値(attack/releaseは秒) */
 function typicalEnv(loopFlag){
   return loopFlag
-    ? {fromDSP:false, attack:KOALA_ATT_MIN, release:0.35}
-    : {fromDSP:false, attack:KOALA_ATT_MIN, release:0};
+    ? {fromDSP:false, attack:KOALA_ATT_MIN, release:0.35}   // 楽器系: 即立ち上がり+0.35秒リリース
+    : {fromDSP:false, attack:KOALA_ATT_MIN, release:0};     // ワンショット: リリースなし
 }
 
 /* ディレクトリ走査: 妥当なBRRサンプルを列挙 */
